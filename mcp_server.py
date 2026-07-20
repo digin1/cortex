@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Cortex MCP server — always-on memory tools for Claude Code.
 
-Exposes memory_store, memory_search, memory_list, memory_delete, memory_update,
-memory_stats as native Claude Code tools via the MCP protocol (stdio transport).
+Exposes memory_store, memory_search, memory_get, memory_list, memory_delete,
+memory_update, memory_merge, memory_stats as native Claude Code tools via the
+MCP protocol (stdio transport).
 
 Safety guardrails:
   - Content size limit: 5000 chars per memory
@@ -289,14 +290,21 @@ def memory_search(
     n: int = 5,
     memory_type: str = "",
     project: str = "",
+    full: bool = False,
 ) -> str:
     """Semantic search across all stored memories. Returns the most similar matches.
+
+    Each result shows its exact ID (the slug) — pass that ID to memory_get to
+    pull the complete, untruncated memory in a single follow-up call.
 
     Args:
         query: Natural language search query
         n: Number of results to return (default 5, max 20)
         memory_type: Filter by type (empty = all)
         project: Filter by project (empty = all)
+        full: If True, print each result's COMPLETE content instead of a 200-char
+              preview (avoids a follow-up memory_get when you already know the top
+              hit is the one you want). Keep the default False for broad scans.
     """
     collection = get_collection()
     if collection.count() == 0:
@@ -331,6 +339,12 @@ def memory_search(
         _track_recalls(collection, [r["id"] for r in output])
 
     lines = [f"{_prefix()} Found {len(output)} result(s) ({collection.count()} total in DB):\n"]
+    # When full=True, bound total content so a wide search can't recreate the
+    # token-overflow / file-spill failure this flag exists to avoid. Past the
+    # budget, remaining hits fall back to preview + a pointer to memory_get.
+    FULL_OUTPUT_BUDGET = 30000
+    full_chars = 0
+    full_truncated = 0
     for r in output:
         meta = r["metadata"]
         mtype = meta.get("type", "general")
@@ -342,8 +356,61 @@ def memory_search(
         else:
             sim_str = ""
         lines.append(f"  [{mtype}] {r['id']}{proj_tag}{sim_str}")
-        lines.append(f"    {r['content'][:200]}")
+        if full and full_chars < FULL_OUTPUT_BUDGET:
+            full_chars += len(r["content"])
+            lines.append(f"    {r['content']}")
+        elif full:
+            full_truncated += 1
+            lines.append(f"    {r['content'][:200]}  … [truncated — memory_get(\"{r['id']}\") for full text]")
+        else:
+            lines.append(f"    {r['content'][:200]}")
         lines.append("")
+    if full_truncated:
+        lines.append(
+            f"  ({full_truncated} result(s) shown as preview to stay within the output budget; "
+            f"fetch any in full with memory_get)"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_get(memory_id: str) -> str:
+    """Fetch ONE memory in FULL — complete untruncated content plus metadata — by its exact ID.
+
+    Use this immediately after memory_search or memory_list surfaces the right
+    memory but shows only a truncated preview. It returns the whole stored text
+    in a single call, so you never have to fall back to listing the DB or reading
+    the ChromaDB file directly.
+
+    Args:
+        memory_id: The exact ID (the slug shown by memory_search / memory_list)
+    """
+    collection = get_collection()
+    try:
+        result = collection.get(ids=[memory_id])
+    except Exception as e:
+        return f"{_prefix()} Error: {e}"
+    if not result["ids"]:
+        return f"{_prefix()} Not found: {memory_id}"
+
+    # Guard against ChromaDB rows stored with a None document/metadata element
+    doc = (result["documents"][0] if result["documents"] else "") or ""
+    meta = (result["metadatas"][0] if result["metadatas"] else {}) or {}
+
+    # Intentionally a PURE READ — no _track_recalls here. A get-by-id is always a
+    # follow-up to a search that already counted the recall, so tracking again
+    # would double-count and add a read-modify-write clobber risk on the metadata.
+
+    mtype = meta.get("type", "general")
+    proj = meta.get("project", "")
+    proj_tag = f" [{proj}]" if proj else ""
+    tags = meta.get("tags", "")
+
+    lines = [f"{_prefix()} [{mtype}] {memory_id}{proj_tag} ({len(doc)} chars)"]
+    if tags:
+        lines.append(f"    tags: {tags}")
+    lines.append("")
+    lines.append(doc)
     return "\n".join(lines)
 
 

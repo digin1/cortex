@@ -2,7 +2,7 @@
 name: cortex
 description: Cortex — self-evolving memory and agent fleet — store, search, and manage memories with semantic search across all projects
 argument-hint: <store|search|list|delete|update|stats|agents|discover|learn|addskill|config|merge> [args...]
-allowed-tools: "mcp__cortex__memory_store, mcp__cortex__memory_search, mcp__cortex__memory_list, mcp__cortex__memory_delete, mcp__cortex__memory_update, mcp__cortex__memory_merge, mcp__cortex__memory_stats, Bash, Read, Glob, Write, WebSearch, WebFetch, Agent"
+allowed-tools: "mcp__cortex__memory_store, mcp__cortex__memory_search, mcp__cortex__memory_get, mcp__cortex__memory_list, mcp__cortex__memory_delete, mcp__cortex__memory_update, mcp__cortex__memory_merge, mcp__cortex__memory_stats, Bash, Read, Glob, Write, WebSearch, WebFetch, Agent"
 ---
 
 # Cortex Memory System
@@ -14,7 +14,8 @@ You have access to a persistent vector memory database (ChromaDB) via MCP tools.
 ## MCP Tools Available
 
 - `memory_store` — Store a memory with embedding (dedup check built-in)
-- `memory_search` — Semantic similarity search (shows % similarity)
+- `memory_search` — Semantic similarity search (shows % similarity; pass `full=True` to print top hits untruncated)
+- `memory_get` — Fetch ONE memory in full (untruncated content + metadata) by its exact ID — use after search/list surfaces the right ID
 - `memory_list` — List all memories (with optional filters)
 - `memory_delete` — Delete by ID (archived to audit log)
 - `memory_update` — Update content or metadata (supports append/prepend mode, +tag syntax)

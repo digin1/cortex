@@ -120,6 +120,7 @@ Add the following to your `~/.claude/settings.json` (merge with any existing set
     "allow": [
       "mcp__cortex__memory_store",
       "mcp__cortex__memory_search",
+      "mcp__cortex__memory_get",
       "mcp__cortex__memory_list",
       "mcp__cortex__memory_delete",
       "mcp__cortex__memory_update",

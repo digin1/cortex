@@ -125,9 +125,11 @@ allow = set(perms.get('allow', []))
 allow.update([
     'mcp__cortex__memory_store',
     'mcp__cortex__memory_search',
+    'mcp__cortex__memory_get',
     'mcp__cortex__memory_list',
     'mcp__cortex__memory_delete',
     'mcp__cortex__memory_update',
+    'mcp__cortex__memory_merge',
     'mcp__cortex__memory_stats',
 ])
 perms['allow'] = sorted(allow)
