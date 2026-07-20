@@ -11,6 +11,10 @@ You have access to a persistent vector memory database (ChromaDB) via MCP tools.
 
 **IMPORTANT: Always use the MCP tools (mcp__cortex__memory_store, etc.) — NEVER call memory_db.py via Bash.** The MCP tools provide clean CLI output with spinners and status messages.
 
+**Embeddings:** memories are embedded with `gte-modernbert-base` (768-dim, 8192-token
+context — full memories, no 256-token truncation) via a warm sidecar on `localhost:8110`
+and stored in the `claude_memories_v2` collection. See `config/cortex-embed-service.md`.
+
 ## MCP Tools Available
 
 - `memory_store` — Store a memory with embedding (dedup check built-in)

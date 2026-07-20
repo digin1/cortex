@@ -78,6 +78,13 @@ ChromaDB will also install `onnxruntime` (for embeddings) and `numpy`. No GPU re
 
 **Recommended: Run ChromaDB as a systemd user service** on `localhost:8100` using the v2 API. See `config/chromadb-service.md` for setup instructions. The v1 API is deprecated.
 
+**Embeddings: gte-modernbert-base via a warm sidecar.** Cortex embeds with
+`Alibaba-NLP/gte-modernbert-base` (768-dim, 8192-token context) served by a small
+always-on sidecar on `localhost:8110`, instead of ChromaDB's default MiniLM (which
+truncated memories at 256 tokens). Memories live in the `claude_memories_v2`
+collection. Requires `pip install sentence-transformers`. See
+`config/cortex-embed-service.md` for setup, migration, and fallback behaviour.
+
 ### Step 3: Initialize Database
 
 ```bash

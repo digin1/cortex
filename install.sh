@@ -47,16 +47,87 @@ else
     fi
 fi
 
-# Step 3: Initialize database
+# sentence-transformers powers the semantic embedder (gte-modernbert-base) used by
+# the embed sidecar. Required for the 768-dim collection; without it cortex falls
+# back to the legacy 384-dim MiniLM collection.
+if python3 -c "import sentence_transformers" 2>/dev/null; then
+    echo "  sentence-transformers already installed."
+else
+    if python3 -m pip install --user sentence-transformers 2>/dev/null \
+       || python3 -m pip install sentence-transformers 2>/dev/null \
+       || python3 -m pip install --break-system-packages sentence-transformers 2>/dev/null; then
+        echo "  sentence-transformers installed."
+    else
+        echo "  WARN: could not install sentence-transformers — cortex will run on the"
+        echo "        legacy 384-dim embedder until it is installed."
+    fi
+fi
+
+# Step 3: Start the embed sidecar, then initialize the database
 echo ""
-echo "[3/6] Initializing ChromaDB database..."
+echo "[3/6] Installing embed sidecar service + initializing database..."
+
+# Install the systemd --user unit that keeps the embedding model warm.
+if command -v systemctl >/dev/null 2>&1; then
+    mkdir -p "$HOME/.config/systemd/user"
+    cp "$CLAUDE_DIR/skills/cortex/cortex-embed.service" "$HOME/.config/systemd/user/cortex-embed.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now cortex-embed.service 2>/dev/null \
+        && echo "  cortex-embed.service enabled and started." \
+        || echo "  NOTE: start the sidecar manually: systemctl --user start cortex-embed.service"
+    # Wait briefly for the model to warm before touching the collection.
+    for _ in $(seq 1 30); do
+        curl -s -m 2 http://127.0.0.1:8110/health 2>/dev/null | grep -q '"status": "ok"' && break
+        sleep 2
+    done
+else
+    echo "  NOTE: systemd not available — run the sidecar manually:"
+    echo "        nohup python3 $CLAUDE_DIR/skills/cortex/embed_service.py &"
+fi
 
 python3 -W ignore -c "
+import sys
+sys.path.insert(0, '$CLAUDE_DIR/skills/cortex')
 import chromadb
-client = chromadb.PersistentClient(path='$CLAUDE_DIR/cortex-db')
-col = client.get_or_create_collection('claude_memories')
-print(f'  Database ready: {col.count()} memories')
+try:
+    from lib.embedding import get_embedding_function
+    client = chromadb.HttpClient(host='localhost', port=8100)
+    col = client.get_or_create_collection(
+        'claude_memories_v2', metadata={'hnsw:space': 'cosine'},
+        embedding_function=get_embedding_function())
+    print(f'  Database ready (768-dim): {col.count()} memories')
+except Exception as e:
+    client = chromadb.PersistentClient(path='$CLAUDE_DIR/cortex-db')
+    col = client.get_or_create_collection('claude_memories')
+    print(f'  Database ready (legacy 384-dim fallback: {e}): {col.count()} memories')
 "
+
+# Migrate existing memories into the 768-dim collection if they're stranded in the
+# legacy one (e.g. upgrading an existing install, or a second machine). Only runs
+# when legacy has docs and v2 is still empty, and only if the sidecar is healthy.
+MIGRATE_NEEDED=$(python3 -W ignore -c "
+import sys
+sys.path.insert(0, '$CLAUDE_DIR/skills/cortex')
+import chromadb
+try:
+    from lib.embedding import get_embedding_function
+    c = chromadb.HttpClient(host='localhost', port=8100)
+    legacy = c.get_or_create_collection('claude_memories').count()
+    v2 = c.get_or_create_collection('claude_memories_v2',
+                                     embedding_function=get_embedding_function()).count()
+    print('yes' if (legacy > 0 and v2 == 0) else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null)
+if [ "$MIGRATE_NEEDED" = "yes" ] && curl -s -m 2 http://127.0.0.1:8110/health 2>/dev/null | grep -q '"status": "ok"'; then
+    echo "  Migrating existing memories into the 768-dim collection (one-time re-embed)..."
+    python3 "$CLAUDE_DIR/skills/cortex/rebuild_embeddings.py" \
+        --source claude_memories --target claude_memories_v2 2>&1 | tail -2
+elif [ "$MIGRATE_NEEDED" = "yes" ]; then
+    echo "  NOTE: existing memories are in the legacy collection but the embed sidecar"
+    echo "        isn't healthy yet. After it starts, run:"
+    echo "        python3 $CLAUDE_DIR/skills/cortex/rebuild_embeddings.py"
+fi
 
 # Step 4: Configure MCP server
 echo ""

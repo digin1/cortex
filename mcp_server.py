@@ -195,7 +195,11 @@ def _maybe_rotate_audit_log():
         pass
 
 
-DEDUP_DISTANCE_THRESHOLD = 0.15  # Cosine distance below this = near-duplicate
+# Cosine distance below this = near-duplicate. Calibrated for the gte-modernbert
+# embedder (2026-07-20): distinct-but-related memories sit as close as 0.075, and
+# 16% of the DB has a distinct neighbour within 0.15 — so the old 0.15 would
+# false-block. 0.06 blocks only near-identical re-stores (>94% similar).
+DEDUP_DISTANCE_THRESHOLD = 0.06
 
 
 @mcp.tool()
@@ -208,8 +212,8 @@ def memory_store(
 ) -> str:
     """Store a memory in the vector database with semantic embedding.
 
-    Automatically checks for near-duplicates before storing. If a similar
-    memory exists (>85% similarity), returns a warning with the existing ID
+    Automatically checks for near-duplicates before storing. If a near-identical
+    memory exists (>~94% similarity), returns a warning with the existing ID
     so you can update it instead.
 
     Args:

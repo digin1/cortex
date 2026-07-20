@@ -17,6 +17,11 @@ CHROMA_HOST = os.environ.get("CORTEX_CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.environ.get("CORTEX_CHROMA_PORT", "8100"))
 DB_PATH = os.path.expanduser("~/.claude/cortex-db")
 
+# Canonical collection (768-dim, gte-modernbert via the embed sidecar).
+DEFAULT_COLLECTION = os.environ.get("CORTEX_COLLECTION", "claude_memories_v2")
+# Legacy 384-dim MiniLM collection — kept as an instant rollback + degraded fallback.
+LEGACY_COLLECTION = "claude_memories"
+
 _client = None
 
 
@@ -45,9 +50,52 @@ def get_client():
     return _client
 
 
-def get_collection(name="claude_memories"):
+def _embedding_module():
+    # Importable both as `lib.embedding` (MCP server: cortex root on path) and as
+    # `embedding` (shell hooks: lib/ inserted on path).
+    try:
+        import embedding as _emb
+    except ImportError:
+        from lib import embedding as _emb
+    return _emb
+
+
+def get_collection(name=None):
+    """Return the cortex collection.
+
+    Default: the 768-dim `claude_memories_v2` collection embedded via the warm
+    sidecar (lib/embedding.py). If embeddings genuinely can't be produced — the
+    sidecar is down AND the in-process model library isn't importable, or the
+    embedding module fails to load — degrade to the legacy 384-dim
+    `claude_memories` with Chroma's default embedder so cortex still functions
+    (with the old-quality retrieval) rather than hard-erroring at query time.
+    """
     client = get_client()
+    coll_name = name or DEFAULT_COLLECTION
+
+    # The legacy 384-dim collection uses Chroma's default embedder.
+    if coll_name == LEGACY_COLLECTION:
+        return client.get_or_create_collection(
+            name=LEGACY_COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+    # Every other collection is 768-dim and MUST be opened with the sidecar EF —
+    # opening it plain makes Chroma fall back to its 384-dim default embedder and
+    # dimension-mismatch on the first query/add.
+    try:
+        emb = _embedding_module()
+        if emb.embedding_available():
+            return client.get_or_create_collection(
+                name=coll_name,
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=emb.get_embedding_function(),
+            )
+    except Exception:
+        pass
+    # Embeddings genuinely unavailable — degrade to the legacy collection so cortex
+    # still functions (old-quality retrieval) rather than hard-erroring at query time.
     return client.get_or_create_collection(
-        name=name,
+        name=LEGACY_COLLECTION,
         metadata={"hnsw:space": "cosine"},
     )

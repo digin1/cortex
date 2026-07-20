@@ -1,0 +1,29 @@
+[Unit]
+Description=Cortex embedding sidecar (keeps the memory embedding model warm)
+Documentation=https://github.com/digin1/cortex
+After=network-online.target
+# Stop thrashing if the model can't load (e.g. sentence-transformers missing):
+# give up after 5 failed starts in 5 minutes instead of restarting forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# NOTE: this is a systemd --user unit. It survives Claude Code restarts, but to
+# survive logout/reboot the user must enable lingering once (needs sudo):
+#   sudo loginctl enable-linger $USER
+# The chromadb user service (config/chromadb-service.md) has the same requirement.
+
+[Service]
+Type=simple
+# Warm gte-modernbert-base in one long-lived process so per-prompt hooks don't
+# pay a ~6s cold model load. Loopback-only HTTP on 127.0.0.1:8110.
+ExecStart=/usr/bin/python3 %h/.claude/skills/cortex/embed_service.py
+Environment=CORTEX_EMBED_PORT=8110
+Environment=HF_HOME=%h/.cache/huggingface
+Environment=TOKENIZERS_PARALLELISM=false
+Restart=on-failure
+RestartSec=3
+# Give the model time to load on start before systemd considers it failed.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

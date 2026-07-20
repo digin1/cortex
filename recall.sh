@@ -437,11 +437,14 @@ else:
         elif recall_count >= 2:
             dist *= 0.92   # 8% boost for moderately recalled
 
-        # Boosted thresholds for "remember" queries, relaxed for project matches
+        # Distance gates calibrated for the gte-modernbert embedder (2026-07-20):
+        # relevant hits land at ~0.19-0.32 cosine distance and noise beyond ~0.45,
+        # a tighter spread than the old MiniLM model — so these gates dropped from
+        # 0.6/0.7/0.75/0.85. Looser for "remember" queries and project matches.
         if is_remember_query:
-            threshold = 0.85 if mem_project in matched_projects else 0.75
+            threshold = 0.55 if mem_project in matched_projects else 0.48
         else:
-            threshold = 0.7 if mem_project in matched_projects else 0.6
+            threshold = 0.45 if mem_project in matched_projects else 0.40
 
         if dist < threshold:
             relevant.append({
