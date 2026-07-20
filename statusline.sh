@@ -1,6 +1,22 @@
 #!/bin/bash
 # Status line for vector memory — multi-line, clear labels, visual indicators
 
+# ── Read JSON input from stdin ──
+INPUT=$(cat)
+
+# ── Context window usage ──
+USED_PCT=$(echo "$INPUT" | jq -r '.context_window.used_percentage // empty' 2>/dev/null)
+CTX_LINE=""
+if [ -n "$USED_PCT" ]; then
+    USED_INT=$(printf '%.0f' "$USED_PCT")
+    REMAINING_INT=$((100 - USED_INT))
+    # Build a simple ASCII bar (20 chars wide)
+    FILLED=$(( USED_INT / 5 ))
+    EMPTY=$(( 20 - FILLED ))
+    BAR=$(printf '%0.s#' $(seq 1 $FILLED) 2>/dev/null)$(printf '%0.s-' $(seq 1 $EMPTY) 2>/dev/null)
+    CTX_LINE="Context [${BAR}] ${USED_INT}% used, ${REMAINING_INT}% remaining"
+fi
+
 # ── Line 0: PS1-style shell prompt header ──
 PS1_LINE=$(printf "\033[01;32m%s@%s\033[00m:\033[01;34m%s\033[00m" "$(whoami)" "$(hostname -s)" "$(pwd)")
 
@@ -214,7 +230,13 @@ fi
 
 
 # ── Assemble output ──
-OUTPUT="${PS1_LINE}\n\U0001f9e0 ${MEMORY_LINE}"
+OUTPUT="${PS1_LINE}"
+
+if [ -n "$CTX_LINE" ]; then
+    OUTPUT="${OUTPUT}\n${CTX_LINE}"
+fi
+
+OUTPUT="${OUTPUT}\n\U0001f9e0 ${MEMORY_LINE}"
 
 if [ -n "$FLEET_LINE" ]; then
     OUTPUT="${OUTPUT}\n\U0001f916 ${FLEET_LINE}"
