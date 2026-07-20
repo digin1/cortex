@@ -24,12 +24,15 @@ except Exception:  # chromadb not importable in this context
         pass
 
 MODEL_NAME = os.environ.get("CORTEX_EMBED_MODEL", "Alibaba-NLP/gte-modernbert-base")
+RERANK_MODEL = os.environ.get("CORTEX_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 EMBED_HOST = os.environ.get("CORTEX_EMBED_HOST", "127.0.0.1")
 EMBED_PORT = int(os.environ.get("CORTEX_EMBED_PORT", "8110"))
 _SIDECAR_URL = f"http://{EMBED_HOST}:{EMBED_PORT}/embed"
+_RERANK_URL = f"http://{EMBED_HOST}:{EMBED_PORT}/rerank"
 _SIDECAR_TIMEOUT = float(os.environ.get("CORTEX_EMBED_TIMEOUT", "10"))
 
-_local_model = None  # lazy in-process fallback, cached per process
+_local_model = None       # lazy in-process embedder fallback, cached per process
+_local_reranker = None    # lazy in-process reranker fallback, cached per process
 
 
 def _embed_via_sidecar(texts):
@@ -60,6 +63,38 @@ def embed_texts(texts):
         return _embed_via_sidecar(texts)
     except Exception:
         return _embed_local(texts)
+
+
+def _rerank_via_sidecar(query, documents):
+    payload = json.dumps({"query": query, "documents": list(documents)}).encode("utf-8")
+    req = urllib.request.Request(
+        _RERANK_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=_SIDECAR_TIMEOUT) as resp:
+        return json.loads(resp.read())["scores"]
+
+
+def _rerank_local(query, documents):
+    global _local_reranker
+    if _local_reranker is None:
+        from sentence_transformers import CrossEncoder
+        _local_reranker = CrossEncoder(RERANK_MODEL)
+    return [float(s) for s in _local_reranker.predict([(query, d) for d in documents])]
+
+
+def rerank_scores(query, documents):
+    """Cross-encoder relevance scores for (query, doc) pairs. Sidecar first,
+    in-process CrossEncoder as fallback. Returns [] for empty input; on total
+    failure returns None so the caller can fall back to its input ordering."""
+    if not documents:
+        return []
+    try:
+        return _rerank_via_sidecar(query, documents)
+    except Exception:
+        try:
+            return _rerank_local(query, documents)
+        except Exception:
+            return None
 
 
 def embedding_available():

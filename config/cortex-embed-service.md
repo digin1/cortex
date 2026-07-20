@@ -1,35 +1,50 @@
-# Cortex Embed Sidecar Setup
+# Cortex Embed + Rerank Sidecar Setup
 
 Cortex embeds memories with **gte-modernbert-base** (768-dim, 8192-token context)
 instead of ChromaDB's default `all-MiniLM-L6-v2` (which silently truncated every
-memory at 256 tokens). The model is served by a small always-on "sidecar" so
-per-prompt hooks (`recall.sh`) don't cold-load a torch model on every prompt.
+memory at 256 tokens), and reranks results with a **cross-encoder**. Both models
+are served by a small always-on "sidecar" so per-prompt hooks (`recall.sh`) don't
+cold-load a torch model on every prompt.
+
+Retrieval is **hybrid**: dense (gte-modernbert) + BM25 keyword (`rank-bm25`) fused
+via Reciprocal Rank Fusion, then reranked by the cross-encoder — see
+`lib/retrieval.py`.
 
 ## Why a sidecar
 
-Loading the model in-process costs ~6s + ~1.3 GB. `recall.sh` runs on *every*
-user prompt, so it must not pay that. The sidecar keeps the model warm in one
-long-lived process; callers embed over loopback HTTP in ~60 ms. Result: the
-per-prompt recall path is ~0.5 s (faster than the old MiniLM default) with the
-far better embeddings.
+Loading the models in-process costs ~6s + ~1.3 GB. `recall.sh` runs on *every*
+user prompt, so it must not pay that. The sidecar keeps the models warm in one
+long-lived process; callers embed/rerank over loopback HTTP.
+
+**Per-prompt recall latency:** ~0.5 s with dense-only embedding; ~1.3 s with the
+full hybrid+rerank path (BM25 corpus build + cross-encoder call). Disable the
+hybrid path in the recall hook with `CORTEX_RECALL_HYBRID=0` to restore ~0.5 s
+(the `memory_search` tool always uses hybrid regardless).
 
 ## Service Details
 
 - **Host/Port:** `127.0.0.1:8110` (loopback only; override with `CORTEX_EMBED_PORT`)
-- **Model:** `Alibaba-NLP/gte-modernbert-base` (override with `CORTEX_EMBED_MODEL`)
+- **Embed model:** `Alibaba-NLP/gte-modernbert-base` (override `CORTEX_EMBED_MODEL`)
+- **Rerank model:** `cross-encoder/ms-marco-MiniLM-L-6-v2` (override `CORTEX_RERANK_MODEL`)
 - **Script:** `~/.claude/skills/cortex/embed_service.py`
-- **Endpoints:** `GET /health`, `POST /embed {"texts":[...]}`
+- **Endpoints:** `GET /health`, `POST /embed {"texts":[...]}`, `POST /rerank {"query":...,"documents":[...]}`
 - **Collection:** `claude_memories_v2` (768-dim). The old `claude_memories`
   (384-dim) is kept as an instant rollback + degraded fallback.
+
+### Env toggles
+
+- `CORTEX_RECALL_HYBRID=0` — recall hook uses dense-only (faster, ~0.5 s/prompt).
+- `CORTEX_EMBED_MODEL` / `CORTEX_RERANK_MODEL` — swap models (re-embed after an
+  embed-model change; see below).
 
 ## Install
 
 ```bash
-pip install --user sentence-transformers        # pulls transformers + torch
+pip install --user sentence-transformers rank-bm25   # embedder+reranker; BM25 keyword half
 cp ~/.claude/skills/cortex/cortex-embed.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now cortex-embed.service
-curl -s http://127.0.0.1:8110/health            # {"status":"ok","model":...,"dim":768}
+curl -s http://127.0.0.1:8110/health            # {"status":"ok","model":...,"dim":768,"reranker":...}
 ```
 
 ## Migrate existing memories (one-time)
@@ -57,6 +72,8 @@ sudo loginctl enable-linger $USER
   loads the model in-process (correct, just slow) — see `lib/embedding.py`.
 - Sidecar down **and** `sentence-transformers` missing → `get_collection()` degrades
   to the legacy 384-dim `claude_memories` with Chroma's default embedder.
+- Reranker unavailable → results fall back to RRF (fused dense+BM25) order.
+- `rank-bm25` missing → hybrid runs dense+rerank only (no keyword half).
 
 ## Recalibrated thresholds
 

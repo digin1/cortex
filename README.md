@@ -718,8 +718,10 @@ Contributions welcome! Areas of interest:
 - **Recall caching** — daemon process to avoid ChromaDB cold-start on every prompt
 - **Cross-project federation** — share agents between projects intelligently
 - **Fleet analytics** — usage trends, score degradation alerts, visualizations
-- **Hybrid search** — combine vector + keyword (BM25/FTS5) for better recall
 - **Plugin packaging** — convert to official Claude Code plugin format
+
+Recently shipped: **hybrid search** (dense + BM25 + cross-encoder rerank, see
+`config/cortex-embed-service.md`).
 
 ---
 

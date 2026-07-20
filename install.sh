@@ -63,6 +63,21 @@ else
     fi
 fi
 
+# rank-bm25 powers the BM25 keyword half of hybrid retrieval. Without it, search
+# degrades to dense+rerank only (no crash) — so it's a soft dependency.
+if python3 -c "import rank_bm25" 2>/dev/null; then
+    echo "  rank-bm25 already installed."
+else
+    if python3 -m pip install --user rank-bm25 2>/dev/null \
+       || python3 -m pip install rank-bm25 2>/dev/null \
+       || python3 -m pip install --break-system-packages rank-bm25 2>/dev/null; then
+        echo "  rank-bm25 installed."
+    else
+        echo "  WARN: could not install rank-bm25 — hybrid search will run dense-only"
+        echo "        (no BM25 keyword half) until it is installed."
+    fi
+fi
+
 # Step 3: Start the embed sidecar, then initialize the database
 echo ""
 echo "[3/6] Installing embed sidecar service + initializing database..."

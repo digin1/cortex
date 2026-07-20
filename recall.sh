@@ -390,70 +390,90 @@ else:
     # except Exception:
     #     pass  # Timeout or missing claude — fall back to regular search
 
-    # ── Multi-query ChromaDB search ────────────────────────────────
+    # ── Hybrid retrieval (dense + BM25 + cross-encoder rerank) ─────
+    # Adds keyword recall + reranking on top of dense search. Falls back to the
+    # dense-only path on any error; disable with CORTEX_RECALL_HYBRID=0.
     n_results = min(10 if is_remember_query else 5, col.count())
+    relevant = None
 
-    # Primary search: user prompt + assistant context
-    results = col.query(
-        query_texts=[search_query],
-        n_results=n_results
-    )
-
-    # Secondary search: LLM-expanded keywords (if available)
-    expanded_results = None
-    if expanded_query:
+    if os.environ.get("CORTEX_RECALL_HYBRID", "1") != "0":
         try:
-            expanded_results = col.query(
-                query_texts=[expanded_query],
-                n_results=n_results
-            )
+            from retrieval import hybrid_search, rerank_relevance_pct
+            hits = hybrid_search(col, search_query, n_results=max(n_results, 8))
+            relevant = []
+            for h in hits:
+                meta = h.get("metadata") or {}
+                mem_type = meta.get("type", "general")
+                if mem_type == "agent_eval":
+                    continue
+                mem_project = meta.get("project", "")
+                pct = rerank_relevance_pct(h.get("rerank_score"))
+                hdist = h.get("distance")
+                # Rerank-relevance gate (relevant hits score ~90%+, noise <10%).
+                # Floors map to logits >= ~0 so weak-negative rerank scores drop.
+                if pct is not None:
+                    if is_remember_query:
+                        floor = 30 if mem_project in matched_projects else 40
+                    else:
+                        floor = 40 if mem_project in matched_projects else 50
+                    if pct < floor:
+                        continue
+                elif hdist is not None:
+                    # Reranker unavailable — gate on cosine distance like the dense path.
+                    if is_remember_query:
+                        thr = 0.55 if mem_project in matched_projects else 0.48
+                    else:
+                        thr = 0.45 if mem_project in matched_projects else 0.40
+                    if hdist >= thr:
+                        continue
+                relevant.append({
+                    "id": h["id"],
+                    "content": (h.get("document") or "")[:400],
+                    "type": mem_type,
+                    "project": mem_project,
+                    "distance": round(h["distance"], 3) if h.get("distance") is not None else None,
+                })
+                if len(relevant) >= n_results:
+                    break
         except Exception:
-            pass
+            relevant = None  # fall back to dense-only below
 
-    # Merge results: keep best (lowest) distance per memory ID
-    best = {}  # mid → (dist, index, source_results)
-    for src in [results, expanded_results]:
-        if src is None:
-            continue
-        for i in range(len(src["ids"][0])):
-            mid = src["ids"][0][i]
-            dist = src["distances"][0][i] if src.get("distances") else 1.0
+    if relevant is None:
+        # ── Fallback: dense-only ChromaDB search + distance gate ──────
+        results = col.query(query_texts=[search_query], n_results=n_results)
+        best = {}  # mid → (dist, index)
+        for i in range(len(results["ids"][0])):
+            mid = results["ids"][0][i]
+            dist = results["distances"][0][i] if results.get("distances") else 1.0
             if mid not in best or dist < best[mid][0]:
-                best[mid] = (dist, i, src)
+                best[mid] = (dist, i)
 
-    relevant = []
-    for mid, (dist, i, src) in best.items():
-        meta = src["metadatas"][0][i]
-        mem_type = meta.get("type", "general")
-        mem_project = meta.get("project", "")
-
-        if mem_type == "agent_eval":
-            continue
-
-        # Recall boost: frequently recalled memories get a distance discount (closer = better)
-        recall_count = int(meta.get("recall_count", "0") or "0")
-        if recall_count >= 5:
-            dist *= 0.85   # 15% boost for heavily recalled memories
-        elif recall_count >= 2:
-            dist *= 0.92   # 8% boost for moderately recalled
-
-        # Distance gates calibrated for the gte-modernbert embedder (2026-07-20):
-        # relevant hits land at ~0.19-0.32 cosine distance and noise beyond ~0.45,
-        # a tighter spread than the old MiniLM model — so these gates dropped from
-        # 0.6/0.7/0.75/0.85. Looser for "remember" queries and project matches.
-        if is_remember_query:
-            threshold = 0.55 if mem_project in matched_projects else 0.48
-        else:
-            threshold = 0.45 if mem_project in matched_projects else 0.40
-
-        if dist < threshold:
-            relevant.append({
-                "id": mid,
-                "content": src["documents"][0][i][:400],
-                "type": mem_type,
-                "project": mem_project,
-                "distance": round(dist, 3)
-            })
+        relevant = []
+        for mid, (dist, i) in best.items():
+            meta = results["metadatas"][0][i]
+            mem_type = meta.get("type", "general")
+            mem_project = meta.get("project", "")
+            if mem_type == "agent_eval":
+                continue
+            # Recall boost: frequently recalled memories get a distance discount.
+            recall_count = int(meta.get("recall_count", "0") or "0")
+            if recall_count >= 5:
+                dist *= 0.85
+            elif recall_count >= 2:
+                dist *= 0.92
+            # gte-modernbert distance gates (tighter than the old MiniLM model).
+            if is_remember_query:
+                threshold = 0.55 if mem_project in matched_projects else 0.48
+            else:
+                threshold = 0.45 if mem_project in matched_projects else 0.40
+            if dist < threshold:
+                relevant.append({
+                    "id": mid,
+                    "content": results["documents"][0][i][:400],
+                    "type": mem_type,
+                    "project": mem_project,
+                    "distance": round(dist, 3)
+                })
 
     if relevant:
         with open(ACTIVITY_FILE, "w") as af:

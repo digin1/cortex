@@ -26,6 +26,7 @@ sys_path = os.path.dirname(os.path.abspath(__file__))
 if sys_path not in sys.path:
     sys.path.insert(0, sys_path)
 from lib.chroma_client import get_client, get_collection as _chroma_get_collection
+from lib import retrieval
 
 from mcp.server.fastmcp import FastMCP
 
@@ -317,25 +318,25 @@ def memory_search(
     # Cap results to prevent excessive output
     n = min(n, 20)
 
-    where = {}
+    conds = []
     if memory_type:
-        where["type"] = memory_type
+        conds.append({"type": memory_type})
     if project:
-        where["project"] = project
+        conds.append({"project": project})
+    where = conds[0] if len(conds) == 1 else ({"$and": conds} if conds else None)
 
-    results = collection.query(
-        query_texts=[query[:1000]],  # Truncate query to prevent abuse
-        n_results=min(n, collection.count()),
-        where=where if where else None,
-    )
+    # Hybrid retrieval: dense (gte-modernbert) + BM25 keyword, fused via RRF and
+    # reranked by a cross-encoder. Query truncated to prevent abuse.
+    hits = retrieval.hybrid_search(collection, query[:1000], n_results=n, where=where)
 
     output = []
-    for i in range(len(results["ids"][0])):
+    for h in hits:
         output.append({
-            "id": results["ids"][0][i],
-            "content": results["documents"][0][i],
-            "metadata": results["metadatas"][0][i],
-            "distance": round(results["distances"][0][i], 4) if results.get("distances") else None,
+            "id": h["id"],
+            "content": h["document"] or "",
+            "metadata": h["metadata"] or {},
+            "distance": h.get("distance"),
+            "rerank_score": h.get("rerank_score"),
         })
 
     # Track recalls — update metadata + append to recall log
@@ -354,7 +355,10 @@ def memory_search(
         mtype = meta.get("type", "general")
         proj = meta.get("project", "")
         proj_tag = f" [{proj}]" if proj else ""
-        if r.get("distance") is not None:
+        rr = r.get("rerank_score")
+        if rr is not None:
+            sim_str = f" ({retrieval.rerank_relevance_pct(rr)}% relevant)"
+        elif r.get("distance") is not None:
             similarity = round((1 - r["distance"]) * 100, 1)
             sim_str = f" ({similarity}% similar)"
         else:

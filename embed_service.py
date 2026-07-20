@@ -25,12 +25,14 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 MODEL_NAME = os.environ.get("CORTEX_EMBED_MODEL", "Alibaba-NLP/gte-modernbert-base")
+RERANK_MODEL = os.environ.get("CORTEX_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 HOST = os.environ.get("CORTEX_EMBED_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CORTEX_EMBED_PORT", "8110"))
 MAX_BODY = 8 * 1024 * 1024  # 8 MB request cap
 
 _model = None
 _dim = None
+_reranker = None
 
 
 def _load_model():
@@ -47,10 +49,26 @@ def _load_model():
     return _model
 
 
+def _load_reranker():
+    # Lazy — only pay the cross-encoder load if reranking is actually used.
+    global _reranker
+    if _reranker is None:
+        from sentence_transformers import CrossEncoder
+        _reranker = CrossEncoder(RERANK_MODEL)
+        print(f"[cortex-embed] loaded reranker {RERANK_MODEL}", file=sys.stderr, flush=True)
+    return _reranker
+
+
 def _embed(texts):
     m = _load_model()
     vecs = m.encode(list(texts), normalize_embeddings=True, batch_size=32)
     return [list(map(float, v)) for v in vecs]
+
+
+def _rerank(query, documents):
+    ce = _load_reranker()
+    scores = ce.predict([(query, d) for d in documents], batch_size=32)
+    return [float(s) for s in scores]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -64,34 +82,62 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") == "/health":
-            self._json(200, {"status": "ok", "model": MODEL_NAME, "dim": _dim})
+            self._json(200, {"status": "ok", "model": MODEL_NAME, "dim": _dim,
+                             "reranker": RERANK_MODEL})
         else:
             self._json(404, {"error": "not found"})
 
-    def do_POST(self):
-        if self.path.rstrip("/") != "/embed":
-            self._json(404, {"error": "not found"})
-            return
+    def _read_json_body(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_BODY:
             self._json(400, {"error": "bad content-length"})
-            return
+            return None
         try:
-            data = json.loads(self.rfile.read(length))
-            texts = data["texts"]
-            if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
-                raise ValueError("texts must be a list of strings")
+            return json.loads(self.rfile.read(length))
         except Exception as e:
-            self._json(400, {"error": f"bad request: {e}"})
-            return
-        try:
-            embs = _embed(texts)
-            self._json(200, {"embeddings": embs, "model": MODEL_NAME})
-        except Exception as e:
-            self._json(500, {"error": f"embed failed: {e}"})
+            self._json(400, {"error": f"bad json: {e}"})
+            return None
+
+    def do_POST(self):
+        path = self.path.rstrip("/")
+        if path == "/embed":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                texts = data["texts"]
+                if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+                    raise ValueError("texts must be a list of strings")
+            except Exception as e:
+                self._json(400, {"error": f"bad request: {e}"})
+                return
+            try:
+                self._json(200, {"embeddings": _embed(texts), "model": MODEL_NAME})
+            except Exception as e:
+                self._json(500, {"error": f"embed failed: {e}"})
+        elif path == "/rerank":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                query = data["query"]
+                documents = data["documents"]
+                if not isinstance(query, str) or not isinstance(documents, list) \
+                        or not all(isinstance(d, str) for d in documents):
+                    raise ValueError("query must be a string and documents a list of strings")
+            except Exception as e:
+                self._json(400, {"error": f"bad request: {e}"})
+                return
+            try:
+                scores = _rerank(query, documents) if documents else []
+                self._json(200, {"scores": scores, "model": RERANK_MODEL})
+            except Exception as e:
+                self._json(500, {"error": f"rerank failed: {e}"})
+        else:
+            self._json(404, {"error": "not found"})
 
     def log_message(self, format, *args):
         pass  # quiet; systemd/journal captures stderr prints above
