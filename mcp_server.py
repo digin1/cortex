@@ -369,9 +369,9 @@ def memory_search(
             lines.append(f"    {r['content']}")
         elif full:
             full_truncated += 1
-            lines.append(f"    {r['content'][:200]}  … [truncated — memory_get(\"{r['id']}\") for full text]")
+            lines.append(f"    {r['content'][:600]}  … [truncated — memory_get(\"{r['id']}\") for full text]")
         else:
-            lines.append(f"    {r['content'][:200]}")
+            lines.append(f"    {r['content'][:600]}")
         lines.append("")
     if full_truncated:
         lines.append(

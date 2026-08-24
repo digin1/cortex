@@ -152,9 +152,9 @@ is_remember_query = any(kw in prompt_lower for kw in remember_keywords)
 # FIRST MESSAGE: Relevance-ranked context load
 # ================================================================
 if first_msg:
-    MAX_OUTPUT = 7000  # total output cap (memories + inventory + JSON)
+    MAX_OUTPUT = 16000  # total output cap (memories + inventory + JSON); raised with SUMMARY_LIMIT so breadth is kept
     INVENTORY_RESERVE = 2500  # reserve for agent/skill/doc inventory
-    SUMMARY_LIMIT = 150
+    SUMMARY_LIMIT = 600  # 150 was cutting decision-critical clauses out of previews (2026-08-19)
 
     # ── Step 1: Collect all candidate memories with relevance scores ──
     all_data = col.get(include=["documents", "metadatas"])
@@ -428,7 +428,7 @@ else:
                         continue
                 relevant.append({
                     "id": h["id"],
-                    "content": (h.get("document") or "")[:400],
+                    "content": (h.get("document") or "")[:600],
                     "type": mem_type,
                     "project": mem_project,
                     "distance": round(h["distance"], 3) if h.get("distance") is not None else None,
@@ -469,7 +469,7 @@ else:
             if dist < threshold:
                 relevant.append({
                     "id": mid,
-                    "content": results["documents"][0][i][:400],
+                    "content": results["documents"][0][i][:600],
                     "type": mem_type,
                     "project": mem_project,
                     "distance": round(dist, 3)
