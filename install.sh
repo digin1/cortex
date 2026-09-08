@@ -217,6 +217,11 @@ allow.update([
     'mcp__cortex__memory_update',
     'mcp__cortex__memory_merge',
     'mcp__cortex__memory_stats',
+    'mcp__cortex__reminder_add',
+    'mcp__cortex__reminder_list',
+    'mcp__cortex__reminder_done',
+    'mcp__cortex__reminder_snooze',
+    'mcp__cortex__reminder_drop',
 ])
 perms['allow'] = sorted(allow)
 
@@ -229,7 +234,13 @@ settings['statusLine'] = {
 
 # Define hooks
 cortex_hooks = {
-    'UserPromptSubmit': [{'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/recall.sh 2>/dev/null', 'statusMessage': 'Recalling relevant memories...'}]}],
+    'UserPromptSubmit': [
+        {'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/recall.sh 2>/dev/null', 'statusMessage': 'Recalling relevant memories...'}]},
+        # Separate from recall.sh on purpose: recall runs on every prompt in every
+        # session, and a reminder bug must not be able to cost the user their memory
+        # recall. Both hooks inject independently.
+        {'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/reminders.sh 2>/dev/null', 'statusMessage': 'Checking reminders...'}]},
+    ],
     'PreToolUse': [{'matcher': 'mcp__cortex', 'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/cortex_pretool_enrich.sh 2>/dev/null', 'statusMessage': 'Enriching cortex operation...'}]}],
     'PostToolUse': [{'matcher': 'Agent', 'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/agent_track.sh 2>/dev/null', 'statusMessage': 'Tracking agent usage...'}]}],
     'PreCompact': [{'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/compact_save.sh 2>/dev/null', 'statusMessage': 'Extracting learnings + managing agent fleet...'}]}],

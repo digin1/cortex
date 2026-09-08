@@ -39,12 +39,15 @@ cortex gives Claude Code **persistent memory across sessions** and **self-managi
 - **Agents** are automatically created from accumulated knowledge, evaluated on usage, and retired when obsolete
 - **Skills** are auto-discovered from your project's tech stack and generated as slash commands with best practices baked in
 - **Research learner** — on-demand agent that web-searches, distills, and stores knowledge as cortex memories when Claude hits a gap
+- **Reminders** — obligations rather than facts, in their own collection: a due list on
+  the first prompt of a session, and subject-matched nudges on any prompt
 - **Config system** — toggle features on/off via `~/.claude/.cortex_config` JSON file
-- **11 hook events** cover the entire session lifecycle — from startup to shutdown
+- **12 hook events** cover the entire session lifecycle — from startup to shutdown
 - **Multi-project** aware — memories are scoped per project, agents and skills exist at project and global levels
 
 ```
 🧠 44 memories (7 project, 3 feedback, 6 prefs, 26 reference, 2 user) across 2 projects
+⏰ 3 pending | next 2026-03-14T08:00
 🤖 16 agents (11 project + 5 global) | 17 spawns today
 📚 13 skills (10 project + 3 global)
 ⚙ chromadb:✓ | learn:✓ skills:✓ agents:✓
@@ -462,6 +465,7 @@ Unlike the automatic path (which uses LLM knowledge only), the manual command us
 | Hook Event | Script | Sync/Async | What It Does |
 |---|---|---|---|
 | `UserPromptSubmit` | `recall.sh` | Sync | Inject memories into Claude's context |
+| `UserPromptSubmit` | `reminders.sh` | Sync | Surface due + subject-matched reminders |
 | `PreToolUse` | `cortex_pretool_enrich.sh` | Sync | Auto-tag project + audit log for cortex ops |
 | `PostToolUse(Agent)` | `agent_track.sh` | Sync | Track agent spawns in usage ledger |
 | `SubagentStart` | `agent_context_inject.sh` | Sync | Inject domain memories into spawned agents |
@@ -598,6 +602,66 @@ The MCP server exposes resources that can be referenced with `@` in the Claude C
 | `feedback` | User corrections and preferences | *"Always use step=any on auto-calculated number inputs"* |
 | `project` | Technical decisions and architecture | *"Docker Swarm --force reuses cached image, must use --image"* |
 | `reference` | File paths, URLs, commands | *"GitLab API at git.example.com, token in config"* |
+
+---
+
+## Reminders
+
+A **memory** is a timeless fact, injected as background. A **reminder** is an obligation
+that is not yet discharged — *"read the run summary after tomorrow's cron"*. It has a
+subject, sometimes a time, and always an end.
+
+They live in a **separate ChromaDB collection**, deliberately. If reminders sat in the
+memory store, a search for a topic would return an outstanding task as though it were
+knowledge, and memory hygiene would eventually *merge* two obligations into one — which
+is never correct.
+
+| Tool | What |
+|---|---|
+| `reminder_add` | Create one. `due` takes ISO, `+2h`/`+3d`, `tomorrow`, `tomorrow 03:05` |
+| `reminder_list` | `pending` (default), `done`, `dropped`, `expired`, or all |
+| `reminder_done` | Close it — the thing actually happened |
+| `reminder_snooze` | Right reminder, wrong time |
+| `reminder_drop` | Delete it outright |
+
+### Delivery
+
+Reminders surface **only inside a session** — there is no cron and no email, by design.
+A reminder due at 03:05 appears the next time you talk to Claude, which may be hours
+later. It is a catch-up list and a context-sensitive nudge, **not an alarm clock**.
+
+- **First prompt of a session** — everything now due or overdue
+- **Any prompt** — reminders semantically close to what was just asked
+
+### Noise discipline
+
+The failure mode of every reminder system is that the block stops being read. Once that
+happens the *next* reminder — the one that mattered — is skimmed past too. So:
+
+- **Tighter threshold than memory recall** (0.35 vs 0.40–0.55). Memories inform;
+  reminders interrupt, so they must clear a higher bar.
+- **45-minute cooldown** — the same reminder is not raised twice in quick succession.
+- **Self-demotion** — one raised three times without being acted on drops back to the
+  session-opening list rather than continuing to interrupt. A reminder you keep passing
+  over is a reminder that is wrong, and it should get out of the way.
+- **Five per prompt, maximum**; `expires` so stale ones die on their own.
+- **Project-scoped by default**, so one repo's reminders don't follow you into another.
+
+### Writing a good one
+
+```
+reminder_add(
+    text="Verify the migration under real load once the backfill finishes",
+    due="+2d",
+    project="my-service",
+    verify="pytest tests/test_migration.py -q",   # surfacing it becomes actionable
+    links="project_migration_plan",              # context travels with it
+    expires="+30d",                              # a reminder with no end is a leak
+)
+```
+
+An unparseable time is **not guessed** — it becomes a relevance-only reminder, surfacing
+when the subject comes up rather than on a date invented for it.
 
 ---
 

@@ -768,5 +768,124 @@ def resource_typed_memories(memory_type: str) -> str:
     return "\n".join(lines)
 
 
+
+# ======================================================================
+# Reminders — pending obligations, as distinct from remembered facts.
+# Stored in their own collection (see lib/reminders.py for why), surfaced only
+# inside a session by the reminders.sh UserPromptSubmit hook.
+# ======================================================================
+
+def _rem():
+    from lib import reminders as R
+    return R
+
+
+@mcp.tool()
+def reminder_add(text: str, due: str = "", project: str = "", verify: str = "",
+                 links: str = "", tags: str = "", expires: str = "",
+                 reminder_id: str = "") -> str:
+    """Create a reminder — something still OWED, not something known.
+
+    Use for work whose proof lands in the future: a scheduled run to inspect, a deploy
+    to verify, a decision parked with someone else, a follow-up the user asked for.
+    Facts belong in memory_store; obligations belong here.
+
+    Args:
+        text: what is owed, written so it still makes sense in three weeks
+        due: when it comes up. ISO, "+2h"/"+3d", "tomorrow", "tomorrow 03:05".
+             EMPTY means relevance-only — it surfaces whenever the subject comes up,
+             which suits "the three papers are still in the corpus" better than a date.
+        project: scope it to a repo (default: surfaces only there). Empty = everywhere.
+        verify: the actual command that settles it, so surfacing it is actionable
+                rather than a nag. e.g. "pytest tests/test_migration.py -q"
+        links: related memory ids, comma-separated — carries the full context along
+        tags: comma-separated
+        expires: when it should give up and stop asking. Strongly encouraged.
+        reminder_id: custom id (auto if empty)
+    """
+    R = _rem()
+    if len(text.strip()) < 5:
+        return f"{_prefix()} Error: reminder text too short."
+    try:
+        r = R.add(text.strip(), due=due, project=project, verify=verify, links=links,
+                  tags=tags, expires=expires, reminder_id=reminder_id)
+    except R.ReminderStoreUnavailable as e:
+        return f"{_prefix()} Reminder NOT stored — {e}"
+    when = r["due"] or "no due date (surfaces when the subject comes up)"
+    scope = r["project"] or "all projects"
+    return (f"{_prefix()} Reminder {r['id']} stored.\n  {r['text']}\n"
+            f"  when: {when}\n  scope: {scope}"
+            + (f"\n  expires: {r['expires_at']}" if r["expires_at"] else ""))
+
+
+@mcp.tool()
+def reminder_list(status: str = "pending", project: str = "") -> str:
+    """List reminders. status: pending (default), done, dropped, expired, or "" for all."""
+    R = _rem()
+    try:
+        rows = R.list_all(status=status, project=project or None)
+    except R.ReminderStoreUnavailable as e:
+        return f"{_prefix()} Reminder store unavailable — {e}"
+    if not rows:
+        return f"{_prefix()} No {status or 'stored'} reminders."
+    out = [f"{_prefix()} {len(rows)} {status or 'stored'} reminder(s):"]
+    for r in rows:
+        bits = []
+        if r.get("due"):
+            bits.append(f"due {r['due'][:16]}")
+        if r.get("project"):
+            bits.append(r["project"])
+        if int(r.get("surfaced_count") or 0):
+            bits.append(f"raised {r['surfaced_count']}x")
+        tag = f"  ({', '.join(bits)})" if bits else ""
+        out.append(f"  [{r['id']}]{tag}\n      {r['text']}")
+        if r.get("verify"):
+            out.append(f"      check: {r['verify']}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def reminder_done(reminder_id: str) -> str:
+    """Close a reminder once the thing is actually done. Say so to the user too.
+
+    A reminder that cannot be closed becomes noise, and noise trains the reader to skim
+    past the whole block — which costs the next reminder its audience.
+    """
+    R = _rem()
+    try:
+        r = R.set_status(reminder_id, "done")
+    except R.ReminderStoreUnavailable as e:
+        return f"{_prefix()} Reminder store unavailable — {e}"
+    return (f"{_prefix()} Reminder {reminder_id} closed." if r
+            else f"{_prefix()} No reminder {reminder_id}.")
+
+
+@mcp.tool()
+def reminder_snooze(reminder_id: str, until: str) -> str:
+    """Hold a reminder back until a time. until: ISO, "+2h"/"+3d", "tomorrow"."""
+    R = _rem()
+    try:
+        r = R.snooze(reminder_id, until)
+    except R.ReminderStoreUnavailable as e:
+        return f"{_prefix()} Reminder store unavailable — {e}"
+    if not r:
+        return f"{_prefix()} No reminder {reminder_id}."
+    return (f"{_prefix()} Reminder {reminder_id} held until {r['snooze_until']}."
+            if r["snooze_until"] else
+            f"{_prefix()} Could not read a time from {until!r}; reminder unchanged.")
+
+
+@mcp.tool()
+def reminder_drop(reminder_id: str) -> str:
+    """Delete a reminder outright — it was wrong, or is no longer wanted."""
+    R = _rem()
+    try:
+        r = R.drop(reminder_id)
+    except R.ReminderStoreUnavailable as e:
+        return f"{_prefix()} Reminder store unavailable — {e}"
+    return (f"{_prefix()} Reminder {reminder_id} deleted." if r
+            else f"{_prefix()} No reminder {reminder_id}.")
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

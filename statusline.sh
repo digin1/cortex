@@ -83,6 +83,42 @@ except Exception:
 PYEOF
 )
 
+# ── Line 1b: Reminders ──
+# Shown whenever any are pending. The reminder system is deliberately silent -- it says
+# nothing when nothing is due -- which makes "quiet" and "broken" look identical from the
+# outside. One line here is what distinguishes them at a glance.
+REMINDER_LINE=$(/usr/bin/python3 -W ignore -c "
+import os, sys, time
+sys.path.insert(0, os.path.expanduser('~/.claude/skills/cortex'))
+try:
+    from lib import reminders as R
+    rows = R.list_all(status='pending')
+except Exception:
+    sys.exit(0)                      # store unavailable -> say nothing, never an error line
+if not rows:
+    sys.exit(0)
+now = R.now_iso()
+due = [r for r in rows if (r.get('due') or '') and r['due'] <= now
+       and not ((r.get('snooze_until') or '') > now)]
+overdue_worst = ''
+if due:
+    oldest = min(d['due'] for d in due)
+    try:
+        import datetime
+        days = (datetime.datetime.now()
+                - datetime.datetime.strptime(oldest, '%Y-%m-%dT%H:%M:%S')).days
+        if days >= 1:
+            overdue_worst = f', oldest {days}d overdue'
+    except Exception:
+        pass
+if due:
+    print(f'{len(due)} DUE{overdue_worst} | {len(rows)} pending')
+else:
+    nxt = sorted([r['due'] for r in rows if r.get('due')])
+    tail = f' | next {nxt[0][:16]}' if nxt else ''
+    print(f'{len(rows)} pending{tail}')
+" 2>/dev/null)
+
 # ── Line 2: Agent fleet ──
 FLEET_LINE=$(/usr/bin/python3 -W ignore -c "
 import os, sys, glob, json
@@ -211,7 +247,11 @@ print(f'{db_status} | {\" \".join(toggles)}')
 OPS_LINE=""
 if [ -f "$OPS_LOG" ]; then
     TODAY=$(date +%Y-%m-%d)
-    OPS_TODAY=$(grep -c "\"$TODAY" "$OPS_LOG" 2>/dev/null || echo 0)
+    # `grep -c` EXITS 1 when the count is zero, so `|| echo 0` fired on top of grep's
+    # own "0" and OPS_TODAY became the two-line string "0\n0" -- which then failed
+    # `[ -gt ]` with "integer expression expected" on every render. Take the first line.
+    OPS_TODAY=$(grep -c "\"$TODAY" "$OPS_LOG" 2>/dev/null | head -1)
+    OPS_TODAY=${OPS_TODAY:-0}
     if [ "$OPS_TODAY" -gt 0 ]; then
         OPS_LINE="$OPS_TODAY ops today"
     fi
@@ -237,6 +277,10 @@ if [ -n "$CTX_LINE" ]; then
 fi
 
 OUTPUT="${OUTPUT}\n\U0001f9e0 ${MEMORY_LINE}"
+
+if [ -n "$REMINDER_LINE" ]; then
+    OUTPUT="${OUTPUT}\n\U000023f0 ${REMINDER_LINE}"
+fi
 
 if [ -n "$FLEET_LINE" ]; then
     OUTPUT="${OUTPUT}\n\U0001f916 ${FLEET_LINE}"
