@@ -794,7 +794,7 @@ def reminder_add(text: str, due: str = "", project: str = "", verify: str = "",
         text: what is owed, written so it still makes sense in three weeks
         due: when it comes up. ISO, "+2h"/"+3d", "tomorrow", "tomorrow 03:05".
              EMPTY means relevance-only — it surfaces whenever the subject comes up,
-             which suits "the three papers are still in the corpus" better than a date.
+             which suits "the test fixtures are still in the import" better than a date.
         project: scope it to a repo (default: surfaces only there). Empty = everywhere.
         verify: the actual command that settles it, so surfacing it is actionable
                 rather than a nag. e.g. "pytest tests/test_migration.py -q"

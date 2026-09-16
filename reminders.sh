@@ -77,7 +77,7 @@ def is_first_message(path):
 
 def detect_projects(cwd):
     """Project scope is derived from cwd, matching how recall.sh does it, so a
-    grantlab reminder cannot interrupt unrelated work in another repo."""
+    reminder for one repo cannot interrupt unrelated work in another repo."""
     if not cwd:
         return set()
     try:

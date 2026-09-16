@@ -1,12 +1,12 @@
 """Cortex reminders — pending obligations, as distinct from remembered facts.
 
-A MEMORY is a timeless fact ("the adrenal gland has a cortex"), injected as
-background context. A REMINDER is something still owed ("read off_topic_by_profile
+A MEMORY is a timeless fact ("backups are kept for 30 days"), injected as
+background context. A REMINDER is something still owed ("read the nightly job report
 after the 03:00 run"), and it interrupts. They are different things and they live in
 different collections, deliberately:
 
   * memory recall returns facts; if reminders shared that collection, a search for
-    "librarian ingest" would hand back an outstanding task as though it were knowledge.
+    "nightly job" would hand back an outstanding task as though it were knowledge.
   * memory hygiene dedups and MERGES near-identical entries. Merging two reminders is
     never right -- they are two obligations, not one fact stated twice.
 
@@ -65,7 +65,7 @@ def parse_when(text):
     """Accept the shapes a person actually types. Returns an ISO string, or "".
 
     "" means no due date -- a relevance-only reminder, which is the common case:
-    "whenever we touch the librarian again, the three papers are still in there."
+    "whenever we touch the importer again, the three test fixtures are still in there."
     """
     if not text:
         return ""
