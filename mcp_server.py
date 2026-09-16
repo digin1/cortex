@@ -887,5 +887,213 @@ def reminder_drop(reminder_id: str) -> str:
             else f"{_prefix()} No reminder {reminder_id}.")
 
 
+# ======================================================================
+# Plans — a goal plus a checklist, progressed item by item across sessions.
+# Own collection (see lib/plans.py for why), surfaced inside a session by the
+# plans.sh UserPromptSubmit hook and summarised on the status line.
+# ======================================================================
+
+def _plans():
+    from lib import plans as P
+    return P
+
+
+def _plan_guard(fn):
+    """Turn the library's two refusal types into a one-line answer, never a traceback."""
+    P = _plans()
+    try:
+        return fn(P)
+    except P.PlanError as e:
+        return f"{_prefix()} Plan unchanged — {e}"
+    except P.PlanStoreUnavailable as e:
+        return f"{_prefix()} Plan store unavailable — {e}"
+
+
+def _plan_ignored(row):
+    n = int(row.get("ignored_lines") or 0)
+    if not n:
+        return ""
+    return (f"\n  {n} line(s) were not checklist items and were NOT imported (prose, "
+            "detail under items, code, tables) — keep that detail in its source file or "
+            "a linked memory.")
+
+
+def _plan_next(P, row, n=3):
+    nxt = P.open_items(row)[:n]
+    if not nxt:
+        return ""
+    return "\n  next: " + " ; ".join(f"#{i['id']} {i['text']}" for i in nxt)
+
+
+@mcp.tool()
+def plan_create(title: str, items: str = "", goal: str = "", project: str = "",
+                status: str = "active", tags: str = "", links: str = "",
+                plan_id: str = "", force: bool = False) -> str:
+    """Create a plan — a goal plus a checklist that outlives this session.
+
+    Use for work that spans sessions, and for FUTURE WORK the user wants parked
+    ("later", "phase 2", "backlog"). One-off timed follow-ups belong in reminder_add;
+    facts belong in memory_store; this session's scratch steps belong in the todo list.
+
+    Args:
+        title: short name, e.g. "Migrate auth to OIDC"
+        items: the checklist, ONE ITEM PER LINE. If any line is a Markdown checkbox,
+               only checkbox lines become items and keep their state — "- [ ]" / "[~]"
+               open, "- [x]" done, "- [-]" skipped — and "## Section" lines group the
+               items below them; prose and indented detail are counted and reported,
+               not imported. Without checkboxes, each bullet or plain line is an item.
+        goal: what "done" means and why — written for a stranger in three weeks
+        project: the repo it belongs to (surfaces only there). Leave empty to let the
+                 cortex PreToolUse hook fill in the current repo; "global" = everywhere.
+        status: "active" (being worked now) or "future" (parked backlog)
+        tags: comma-separated
+        links: related memory / reminder ids, comma-separated
+        plan_id: custom id; default is plan_<slugified title>
+        force: create even though a near-identical open plan exists
+    """
+    def run(P):
+        r = P.create(title, items=items, goal=goal, project=project, status=status,
+                     tags=tags, links=links, plan_id=plan_id, force=force)
+        audit_log_write("plan_create", r["id"], metadata={"project": r["project"]})
+        p = P.progress(r)
+        return (f"{_prefix()} Plan {r['id']} created ({r['status']}, "
+                f"{p['total']} item(s), scope: {r['project'] or 'all projects'})."
+                + _plan_ignored(r) + _plan_next(P, r))
+    return _plan_guard(run)
+
+
+@mcp.tool()
+def plan_list(status: str = "open", project: str = "", query: str = "") -> str:
+    """List plans with progress. Check here before creating one — extend, don't duplicate.
+
+    Args:
+        status: "open" (active + future, default), "active", "future", "done",
+                "abandoned", or "all"
+        project: only this project's plans (empty = every scope)
+        query: rank by semantic similarity to this text instead of by recency
+    """
+    def run(P):
+        rows = P.list_plans(status=status, project=project or None, query=query)
+        label = "" if status in ("", "all") else f"{status} "
+        if not rows:
+            return f"{_prefix()} No {label}plans."
+        out = [f"{_prefix()} {len(rows)} {label}plan(s):"]
+        for r in rows:
+            bits = [r.get("status", "?"), P._progress_text(r)]
+            if r.get("project"):
+                bits.append(r["project"])
+            if "distance" in r:
+                bits.append(f"{round((1 - r['distance']) * 100)}% match")
+            out.append(f"  [{r['id']}] {r.get('title', '')}  ({', '.join(bits)})")
+            nxt = P.open_items(r)[:2]
+            if nxt and r.get("status") in P.OPEN_STATUSES:
+                out.append("      next: " + " ; ".join(f"#{i['id']} {i['text']}" for i in nxt))
+        return "\n".join(out)
+    return _plan_guard(run)
+
+
+@mcp.tool()
+def plan_get(plan_id: str) -> str:
+    """The whole plan as a Markdown checklist, with item numbers, goal and notes."""
+    def run(P):
+        r = P.get(plan_id)
+        return P.render_full(r) if r else f"{_prefix()} No plan {plan_id}."
+    return _plan_guard(run)
+
+
+@mcp.tool()
+def plan_check(plan_id: str, items: str, state: str = "done", note: str = "") -> str:
+    """Tick items off — as each one finishes, not in a batch at the end of the session.
+
+    Args:
+        plan_id: the plan
+        items: item numbers: "3", "3,5", "2-4" (all-or-nothing — one unknown number
+               changes nothing)
+        state: "done" (default), "skipped" (deliberately not doing it), or "open" (reopen)
+        note: optional one-liner added to each item's note (earlier notes are kept),
+              e.g. the commit, or the reason it was skipped
+    """
+    def run(P):
+        r, ids = P.check(plan_id, items, state=state, note=note)
+        p = P.progress(r)
+        refs = ", ".join(f"#{i}" for i in ids)
+        msg = (f"{_prefix()} {plan_id}: {refs} → {state}. "
+               f"{P._progress_text(r)}.")
+        if p["total"] and not p["open"] and r.get("status") in P.OPEN_STATUSES:
+            msg += ("\n  Every item is resolved. Once the result is verified, close it: "
+                    f"plan_update(plan_id=\"{plan_id}\", status=\"done\").")
+        return msg + _plan_next(P, r)
+    return _plan_guard(run)
+
+
+@mcp.tool()
+def plan_update(plan_id: str, title: str = "", goal: str = "", status: str = "",
+                project: str = "", tags: str = "", links: str = "", note: str = "",
+                notes_mode: str = "append", add_items: str = "", section: str = "",
+                remove_items: str = "", edit_item: str = "", item_text: str = "") -> str:
+    """Change a plan: status, wording, items, or add a progress note. Empty = unchanged.
+
+    Args:
+        plan_id: the plan
+        title / goal / tags / links: replace the value; "-" clears goal, tags or links
+        status: "active", "future" (park it), "done", "abandoned" (keeps the history —
+                prefer this over plan_delete)
+        project: move to another project; "global" makes it surface everywhere
+        note: a progress note, timestamped and appended ("where I stopped and why")
+        notes_mode: "append" (default) or "replace" (note= becomes the whole log —
+                    for condensing it; an empty replace is refused)
+        add_items: new checklist lines (same rules as plan_create), numbered after
+                   the existing ones
+        section: section heading for add_items that don't carry their own "## Heading"
+        remove_items: item numbers to delete, e.g. "4,6" (numbers are never reused)
+        edit_item / item_text: reword one item, keeping its number and state
+    """
+    def run(P):
+        r = P.update(plan_id, title=title, goal=goal, status=status, project=project,
+                     tags=tags, links=links, note=note, notes_mode=notes_mode,
+                     add_items=add_items, section=section, remove_items=remove_items,
+                     edit_item=edit_item, item_text=item_text)
+        changed = []
+        if r.get("status") != r.get("previous_status"):
+            changed.append(f"status {r.get('previous_status')} → {r['status']}")
+            audit_log_write("plan_status", plan_id, reason=r["status"])
+        if add_items or remove_items or edit_item:
+            changed.append("items changed")
+        if note:
+            changed.append("note added")
+        p = P.progress(r)
+        msg = (f"{_prefix()} Plan {plan_id} updated"
+               + (f" ({'; '.join(changed)})" if changed else "")
+               + f". {P._progress_text(r)}.")
+        if r.get("status") == "done" and p["open"]:
+            msg += f"\n  Note: closed with {p['open']} item(s) still open."
+        return (msg + _plan_ignored(r)
+                + (_plan_next(P, r) if r.get("status") in P.OPEN_STATUSES else ""))
+    return _plan_guard(run)
+
+
+@mcp.tool()
+def plan_delete(plan_id: str) -> str:
+    """Delete a plan outright — it was created by mistake. The full plan is archived to
+    the audit log first. For work that was simply dropped, prefer
+    plan_update(status="abandoned"), which keeps the record."""
+    def archive(row):
+        backup = {k: v for k, v in row.items() if k != "document"}
+        with _open_restricted_append(AUDIT_LOG) as f:
+            f.write(json.dumps({"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                "action": "plan_delete", "memory_id": plan_id,
+                                "plan_backup": backup}) + "\n")
+
+    def run(P):
+        try:
+            r = P.delete(plan_id, archive=archive)
+        except OSError as e:
+            return f"{_prefix()} Plan {plan_id} NOT deleted — could not archive it first ({e})."
+        if r is None:
+            return f"{_prefix()} No plan {plan_id}."
+        return f"{_prefix()} Plan {plan_id} deleted (archived to audit log)."
+    return _plan_guard(run)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -41,6 +41,8 @@ cortex gives Claude Code **persistent memory across sessions** and **self-managi
 - **Research learner** — on-demand agent that web-searches, distills, and stores knowledge as cortex memories when Claude hits a gap
 - **Reminders** — obligations rather than facts, in their own collection: a due list on
   the first prompt of a session, and subject-matched nudges on any prompt
+- **Plans** — a goal plus a checklist, progressed item by item across sessions; parked
+  future work lives here too, and the status line shows progress at a glance
 - **Config system** — toggle features on/off via `~/.claude/.cortex_config` JSON file
 - **12 hook events** cover the entire session lifecycle — from startup to shutdown
 - **Multi-project** aware — memories are scoped per project, agents and skills exist at project and global levels
@@ -48,6 +50,7 @@ cortex gives Claude Code **persistent memory across sessions** and **self-managi
 ```
 🧠 44 memories (7 project, 3 feedback, 6 prefs, 26 reference, 2 user) across 2 projects
 ⏰ 3 pending | next 2026-03-14T08:00
+📋 2 active (5/12 resolved) | 3 future | latest: Migrate auth to OIDC 3/7
 🤖 16 agents (11 project + 5 global) | 17 spawns today
 📚 13 skills (10 project + 3 global)
 ⚙ chromadb:✓ | learn:✓ skills:✓ agents:✓
@@ -303,6 +306,7 @@ cp ~/.claude/skills/cortex/config/CLAUDE.md ~/.claude/CLAUDE.md
 mkdir -p ~/.claude/rules
 cp ~/.claude/skills/cortex/config/cortex-memory.md ~/.claude/rules/cortex-memory.md
 cp ~/.claude/skills/cortex/config/skill-discovery.md ~/.claude/rules/skill-discovery.md
+cp ~/.claude/skills/cortex/config/cortex-plans.md ~/.claude/rules/cortex-plans.md
 ```
 
 > **Why?** Without these, Claude may not search cortex when you ask "do you remember X" — the recall hook injects context automatically, but if it misses something, Claude needs to know it should search manually. These files close that gap.
@@ -466,6 +470,7 @@ Unlike the automatic path (which uses LLM knowledge only), the manual command us
 |---|---|---|---|
 | `UserPromptSubmit` | `recall.sh` | Sync | Inject memories into Claude's context |
 | `UserPromptSubmit` | `reminders.sh` | Sync | Surface due + subject-matched reminders |
+| `UserPromptSubmit` | `plans.sh` | Sync | Surface active + subject-matched plans |
 | `PreToolUse` | `cortex_pretool_enrich.sh` | Sync | Auto-tag project + audit log for cortex ops |
 | `PostToolUse(Agent)` | `agent_track.sh` | Sync | Track agent spawns in usage ledger |
 | `SubagentStart` | `agent_context_inject.sh` | Sync | Inject domain memories into spawned agents |
@@ -665,12 +670,84 @@ when the subject comes up rather than on a date invented for it.
 
 ---
 
+## Plans
+
+A **plan** is a goal plus the steps toward it — a checklist ticked off item by item, often
+over several sessions. Parked **future work** ("later", "phase 2", the backlog) is a plan
+too, with status `future`.
+
+It is neither a memory nor a reminder. A memory is a fact, and memory hygiene merges
+near-duplicates — merging two plans would fuse two bodies of work. A reminder is one
+obligation, closed once; a plan is progressed a step at a time, and the progress is the
+point. So plans get a third collection, `cortex_plans`.
+
+| Tool | What |
+|---|---|
+| `plan_create` | Title, goal, and a checklist — one item per line. If the text has Markdown checkboxes, only checkbox lines become items (`[ ]`/`[~]` open, `[x]` done, `[-]` skipped) and `## Section` lines group them; prose and detail lines are counted and reported, not imported. Empty `project` = the current repo (filled in by the PreToolUse hook); `"global"` = everywhere |
+| `plan_list` | `open` (active + future, default), a single status, or `all`; `query=` ranks by similarity |
+| `plan_get` | The whole plan as a Markdown checklist with item numbers and notes |
+| `plan_check` | Tick items: `"3"`, `"3,5"`, `"2-4"` → `done` / `skipped` / `open` — all-or-nothing |
+| `plan_update` | Status (`active` / `future` / `done` / `abandoned`), wording (`"-"` clears goal, tags, links), add / remove / reword items, timestamped progress notes |
+| `plan_delete` | Remove outright (archived to the audit log first); prefer `status="abandoned"` |
+
+### Guarantees
+
+- **Item numbers are stable for life.** Removing `#3` never renumbers `#4`, and numbers
+  are never reused, so a reference written in one session means the same item in the next.
+- **All-or-nothing edits.** One unknown item number, or one invalid field, and nothing is
+  written.
+- **Concurrent sessions don't lose ticks.** Each session runs its own MCP server, so
+  read-modify-write is serialised with a file lock, and the prompt hook's bookkeeping
+  writes only its own metadata keys.
+- **No accidental twins.** Creating a plan nearly identical to an open one is refused
+  with a pointer to the existing plan (`force=True` overrides).
+- **Fails closed** when embeddings are unavailable, rather than writing plans into the
+  memory store — the same rule as reminders.
+- **Closed plans never crowd out open ones.** Done and abandoned plans are kept for the
+  record, but relevance matching only ever searches open plans.
+
+Behaviour rules for Claude — create only when asked, tick items as they finish, keep
+surfaced plans in the background unless the request continues one — ship in
+`config/cortex-plans.md` and are installed to `~/.claude/rules/`.
+
+### Delivery
+
+- **Status line** — `📋 2 active (5/12 resolved) | 3 future | latest: <title> 3/7`, across
+  all projects (done or skipped counts as resolved), shown only when open plans exist.
+- **First prompt of a session** — up to three active plans in scope, each with its next
+  open items, so a new session picks up where the last one stopped.
+- **Any prompt** — up to two open plans (active or future) close to what was just asked,
+  with the same noise discipline as reminders: a 45-minute cooldown, and self-demotion
+  after three raises without the plan being touched (any edit revives it). The bar is
+  0.40 cosine distance — looser than reminders' 0.35, because a plan informs rather
+  than interrupts.
+
+```
+plan_create(
+    title="Migrate auth to OIDC",
+    goal="Every service authenticates via the IdP; local password tables are gone.",
+    items="""## Services
+- [x] api gateway
+- [ ] billing
+- [ ] reporting
+## Cleanup
+- [ ] retire the legacy password login""",
+    project="my-service",
+)
+plan_check(plan_id="plan_migrate_auth_to_oidc", items="2", note="commit 4f1c2aa")
+plan_update(plan_id="plan_migrate_auth_to_oidc", note="reporting blocked on IdP scopes")
+```
+
+---
+
 ## Architecture
 
 ```
 ~/.claude/
 ├── skills/cortex/
 │   ├── recall.sh                  # UserPromptSubmit: project-aware context injection
+│   ├── reminders.sh               # UserPromptSubmit: due + subject-matched reminders
+│   ├── plans.sh                   # UserPromptSubmit: active + subject-matched plans
 │   ├── cortex_pretool_enrich.sh     # PreToolUse: auto-tag project + audit
 │   ├── agent_context_inject.sh    # SubagentStart: inject domain memories into agents
 │   ├── compact_save.sh            # PreCompact: extract memories + fleet management
@@ -688,14 +765,16 @@ when the subject comes up rather than on a date invented for it.
 │   ├── edit_track.sh              # PostToolUse(Edit,Write): track file modifications (optional)
 │   ├── agent_dashboard.py         # /cortex agents command
 │   ├── statusline.sh              # Multi-line status bar
-│   ├── mcp_server.py              # MCP server: 7 tools + 4 resources
+│   ├── mcp_server.py              # MCP server: 19 tools (memory, reminder, plan) + 4 resources
 │   ├── memory_db.py               # ChromaDB CLI wrapper
 │   ├── SKILL.md                   # Skill definition for /cortex
 │   ├── test.sh                    # Test suite
+│   ├── tests/test_plans.py        # Plans: library, tools, hook, status line
 │   ├── config/
 │   │   ├── CLAUDE.md              # Global behavioral rules → ~/.claude/CLAUDE.md
 │   │   ├── cortex-memory.md       # Memory rules → ~/.claude/rules/cortex-memory.md
 │   │   ├── skill-discovery.md     # Skill discovery rules → ~/.claude/rules/skill-discovery.md
+│   │   ├── cortex-plans.md        # Plan rules → ~/.claude/rules/cortex-plans.md
 │   │   └── chromadb-service.md    # ChromaDB systemd service setup guide
 │   └── lib/
 │       ├── parse_transcript.py    # Transcript JSONL parser
@@ -710,6 +789,8 @@ when the subject comes up rather than on a date invented for it.
 │       ├── skill_detect.py        # Tech stack detector (50+ frameworks)
 │       ├── skill_create.py        # Skill .md file writer with safety caps
 │       ├── chroma_client.py       # ChromaDB client (v2 API, localhost:8100)
+│       ├── reminders.py           # Reminders collection: add, surface, snooze, close
+│       ├── plans.py               # Plans collection: checklists, surfacing, status summary
 ├── cortex-db/              # ChromaDB persistent storage
 ├── agent-usage.jsonl              # Agent spawn ledger
 ├── .cortex_activity                 # Live activity indicator
@@ -718,6 +799,7 @@ when the subject comes up rather than on a date invented for it.
 ├── .cortex_ops_log.jsonl            # PreToolUse operation log
 ├── .cortex_sessions.jsonl           # Session start/end markers
 ├── .cortex_config                   # Feature toggles JSON (auto_learn, auto_skills, etc.)
+├── .cortex_plans.lock               # Serialises plan edits across concurrent sessions
 ├── .retired-agents/               # Retired agents (outside git dirs to avoid discovery)
 └── agents/
     └── *.md                       # Active global agents (memory: user)

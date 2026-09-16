@@ -24,7 +24,8 @@ DB_PATH="$HOME/.claude/cortex-db"
 ACTIVITY_FILE="$HOME/.claude/.cortex_activity"
 OPS_LOG="$HOME/.claude/.cortex_ops_log.jsonl"
 SESSIONS_LOG="$HOME/.claude/.cortex_sessions.jsonl"
-CACHE_FILE="$HOME/.claude/.cortex_statusline_cache"
+# CORTEX_STATUSLINE_CACHE lets tests render into a throwaway cache instead of the live one.
+CACHE_FILE="${CORTEX_STATUSLINE_CACHE:-$HOME/.claude/.cortex_statusline_cache}"
 CACHE_TTL=15  # seconds
 
 # Use cached output if fresh enough
@@ -83,41 +84,81 @@ except Exception:
 PYEOF
 )
 
-# ── Line 1b: Reminders ──
-# Shown whenever any are pending. The reminder system is deliberately silent -- it says
-# nothing when nothing is due -- which makes "quiet" and "broken" look identical from the
-# outside. One line here is what distinguishes them at a glance.
-REMINDER_LINE=$(/usr/bin/python3 -W ignore -c "
+# ── Line 1b/1c: Reminders and plans ──
+# One Python process for both: each start pays the chromadb import, and the status line
+# already runs several. Each part is guarded on its own and flushes as it prints, so a
+# broken plan store cannot take the reminder line down with it. Lines are tagged R| / P|.
+#
+# Reminders are shown whenever any are pending. The reminder system is deliberately
+# silent -- it says nothing when nothing is due -- which makes "quiet" and "broken" look
+# identical from the outside. One line here is what distinguishes them at a glance.
+OBLIGATIONS=$(CORTEX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" /usr/bin/python3 -W ignore -c "
 import os, sys, time
-sys.path.insert(0, os.path.expanduser('~/.claude/skills/cortex'))
-try:
-    from lib import reminders as R
-    rows = R.list_all(status='pending')
-except Exception:
-    sys.exit(0)                      # store unavailable -> say nothing, never an error line
-if not rows:
-    sys.exit(0)
-now = R.now_iso()
-due = [r for r in rows if (r.get('due') or '') and r['due'] <= now
-       and not ((r.get('snooze_until') or '') > now)]
-overdue_worst = ''
-if due:
-    oldest = min(d['due'] for d in due)
+sys.path.insert(0, os.environ.get('CORTEX_DIR') or os.path.expanduser('~/.claude/skills/cortex'))
+
+def reminders_line():
     try:
-        import datetime
-        days = (datetime.datetime.now()
-                - datetime.datetime.strptime(oldest, '%Y-%m-%dT%H:%M:%S')).days
-        if days >= 1:
-            overdue_worst = f', oldest {days}d overdue'
+        from lib import reminders as R
+        rows = R.list_all(status='pending')
     except Exception:
-        pass
-if due:
-    print(f'{len(due)} DUE{overdue_worst} | {len(rows)} pending')
-else:
-    nxt = sorted([r['due'] for r in rows if r.get('due')])
-    tail = f' | next {nxt[0][:16]}' if nxt else ''
-    print(f'{len(rows)} pending{tail}')
+        return                       # store unavailable -> say nothing, never an error line
+    if not rows:
+        return
+    now = R.now_iso()
+    due = [r for r in rows if (r.get('due') or '') and r['due'] <= now
+           and not ((r.get('snooze_until') or '') > now)]
+    overdue_worst = ''
+    if due:
+        oldest = min(d['due'] for d in due)
+        try:
+            import datetime
+            days = (datetime.datetime.now()
+                    - datetime.datetime.strptime(oldest, '%Y-%m-%dT%H:%M:%S')).days
+            if days >= 1:
+                overdue_worst = f', oldest {days}d overdue'
+        except Exception:
+            pass
+    if due:
+        print(f'R|{len(due)} DUE{overdue_worst} | {len(rows)} pending', flush=True)
+    else:
+        nxt = sorted([r['due'] for r in rows if r.get('due')])
+        tail = f' | next {nxt[0][:16]}' if nxt else ''
+        print(f'R|{len(rows)} pending{tail}', flush=True)
+
+def plans_line():
+    # Shown only when open plans exist, across ALL projects (the prompt hook is the
+    # repo-scoped view): active count with their combined checklist progress -- done or
+    # skipped counts as resolved -- parked future work, and the most recently touched
+    # active plan, the one a new session most likely resumes.
+    try:
+        from lib import plans as P
+        s = P.summary()
+    except Exception:
+        return
+    if not s['active'] and not s['future']:
+        return
+    parts = []
+    if s['active']:
+        parts.append(f\"{s['active']} active ({s['active_done']}/{s['active_total']} resolved)\")
+    if s['future']:
+        parts.append(f\"{s['future']} future\")
+    latest = s['latest']
+    if latest:
+        # The assembled output goes through echo -e: a backslash in a title would be read
+        # as an escape (\\c truncates everything after it), and a newline would split the
+        # tagged P| line. chr(92) is a backslash, doubled so echo -e prints one.
+        title = ''.join(ch if ch.isprintable() else ' ' for ch in latest.get('title', ''))
+        title = title if len(title) <= 32 else title[:31] + '…'
+        title = title.replace(chr(92), chr(92) * 2)
+        p = P.progress(latest)
+        parts.append(f\"latest: {title} {p['done'] + p['skipped']}/{p['total']}\")
+    print('P|' + ' | '.join(parts), flush=True)
+
+reminders_line()
+plans_line()
 " 2>/dev/null)
+REMINDER_LINE=$(printf '%s\n' "$OBLIGATIONS" | sed -n 's/^R|//p')
+PLAN_LINE=$(printf '%s\n' "$OBLIGATIONS" | sed -n 's/^P|//p')
 
 # ── Line 2: Agent fleet ──
 FLEET_LINE=$(/usr/bin/python3 -W ignore -c "
@@ -280,6 +321,10 @@ OUTPUT="${OUTPUT}\n\U0001f9e0 ${MEMORY_LINE}"
 
 if [ -n "$REMINDER_LINE" ]; then
     OUTPUT="${OUTPUT}\n\U000023f0 ${REMINDER_LINE}"
+fi
+
+if [ -n "$PLAN_LINE" ]; then
+    OUTPUT="${OUTPUT}\n\U0001f4cb ${PLAN_LINE}"
 fi
 
 if [ -n "$FLEET_LINE" ]; then

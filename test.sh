@@ -387,6 +387,22 @@ except: pass
 " 2>/dev/null
 
 ###############################################################################
+# 8. Plans (lib/plans.py, plan_* MCP tools, plans.sh, status line)
+###############################################################################
+
+# Run by path: a site-packages `tests` package can shadow `-m unittest tests.test_plans`.
+PLANS_OUT=$(/usr/bin/python3 -W ignore "$VMEM_DIR/tests/test_plans.py" 2>&1)
+if [ $? -eq 0 ]; then
+    if echo "$PLANS_OUT" | grep -q "skipped="; then
+        pass "tests/test_plans.py — $(echo "$PLANS_OUT" | grep -E '^Ran ') (live tests SKIPPED: services down)"
+    else
+        pass "tests/test_plans.py — $(echo "$PLANS_OUT" | grep -E '^Ran ')"
+    fi
+else
+    fail "tests/test_plans.py" "$(echo "$PLANS_OUT" | grep -E '^(FAIL|ERROR):' | head -5 | tr '\n' ';')"
+fi
+
+###############################################################################
 # Summary
 ###############################################################################
 

@@ -222,6 +222,12 @@ allow.update([
     'mcp__cortex__reminder_done',
     'mcp__cortex__reminder_snooze',
     'mcp__cortex__reminder_drop',
+    'mcp__cortex__plan_create',
+    'mcp__cortex__plan_list',
+    'mcp__cortex__plan_get',
+    'mcp__cortex__plan_check',
+    'mcp__cortex__plan_update',
+    'mcp__cortex__plan_delete',
 ])
 perms['allow'] = sorted(allow)
 
@@ -240,6 +246,9 @@ cortex_hooks = {
         # session, and a reminder bug must not be able to cost the user their memory
         # recall. Both hooks inject independently.
         {'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/reminders.sh 2>/dev/null', 'statusMessage': 'Checking reminders...'}]},
+        # Plans get their own hook for the same reason: a plans bug must not cost the
+        # user recall or reminders. Hooks on one event run in parallel.
+        {'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/plans.sh 2>/dev/null', 'statusMessage': 'Checking plans...'}]},
     ],
     'PreToolUse': [{'matcher': 'mcp__cortex', 'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/cortex_pretool_enrich.sh 2>/dev/null', 'statusMessage': 'Enriching cortex operation...'}]}],
     'PostToolUse': [{'matcher': 'Agent', 'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/agent_track.sh 2>/dev/null', 'statusMessage': 'Tracking agent usage...'}]}],
@@ -305,6 +314,7 @@ fi
 mkdir -p "$CLAUDE_DIR/rules"
 cp "$CORTEX_DIR/config/cortex-memory.md" "$CLAUDE_DIR/rules/cortex-memory.md"
 cp "$CORTEX_DIR/config/skill-discovery.md" "$CLAUDE_DIR/rules/skill-discovery.md"
+cp "$CORTEX_DIR/config/cortex-plans.md" "$CLAUDE_DIR/rules/cortex-plans.md"
 echo "  Installed rules to ~/.claude/rules/."
 
 # Global agents

@@ -1,8 +1,8 @@
 ---
 name: cortex
 description: Cortex — self-evolving memory and agent fleet — store, search, and manage memories with semantic search across all projects
-argument-hint: <store|search|list|delete|update|stats|agents|discover|learn|addskill|config|merge> [args...]
-allowed-tools: "mcp__cortex__memory_store, mcp__cortex__memory_search, mcp__cortex__memory_get, mcp__cortex__memory_list, mcp__cortex__memory_delete, mcp__cortex__memory_update, mcp__cortex__memory_merge, mcp__cortex__memory_stats, Bash, Read, Glob, Write, WebSearch, WebFetch, Agent"
+argument-hint: <store|search|list|delete|update|stats|plans|agents|discover|learn|addskill|config|merge> [args...]
+allowed-tools: "mcp__cortex__plan_list, mcp__cortex__plan_get, mcp__cortex__memory_store, mcp__cortex__memory_search, mcp__cortex__memory_get, mcp__cortex__memory_list, mcp__cortex__memory_delete, mcp__cortex__memory_update, mcp__cortex__memory_merge, mcp__cortex__memory_stats, Bash, Read, Glob, Write, WebSearch, WebFetch, Agent"
 ---
 
 # Cortex Memory System
@@ -25,6 +25,7 @@ and stored in the `claude_memories_v2` collection. See `config/cortex-embed-serv
 - `memory_update` — Update content or metadata (supports append/prepend mode, +tag syntax)
 - `memory_merge` — Merge 2+ related memories into one consolidated memory
 - `memory_stats` — Show DB statistics
+- `plan_create` / `plan_list` / `plan_get` / `plan_check` / `plan_update` / `plan_delete` — plans: a goal plus a checklist that outlives the session (own collection; see README → Plans)
 
 ## Interpreting the user's request
 
@@ -36,6 +37,7 @@ Parse `$ARGUMENTS` to determine the command:
 - `/cortex delete <id>` → call `memory_delete`
 - `/cortex update <id> <content>` → call `memory_update`
 - `/cortex stats` → call `memory_stats`
+- `/cortex plans` → call `plan_list` (open plans); `/cortex plans all` → `plan_list(status="all")`; `/cortex plans <id>` → `plan_get`
 - `/cortex agents` → run agent fleet dashboard (see below)
 - `/cortex agents discover` → auto-discover and create agents for the current project (see below)
 - `/cortex discover` → auto-discover project skills with web research (see below)

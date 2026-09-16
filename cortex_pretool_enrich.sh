@@ -8,7 +8,7 @@ INPUT=$(cat)
 /usr/bin/python3 -W ignore - "$INPUT" 2>/dev/null <<'PYEOF'
 import sys, json, os, time
 
-OPS_LOG = os.path.expanduser("~/.claude/.cortex_ops_log.jsonl")
+OPS_LOG = os.environ.get("CORTEX_OPS_LOG") or os.path.expanduser("~/.claude/.cortex_ops_log.jsonl")
 
 raw = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
@@ -38,6 +38,8 @@ try:
     # Include memory_id if available
     if "memory_id" in tool_input:
         entry["memory_id"] = tool_input["memory_id"]
+    if "plan_id" in tool_input:
+        entry["plan_id"] = tool_input["plan_id"]
     if "query" in tool_input:
         entry["query"] = tool_input["query"][:100]
 
@@ -63,15 +65,37 @@ except Exception:
 # ================================================================
 # Enrich: auto-detect project for store/update if not set
 # ================================================================
-if tool_short in ("memory_store", "memory_update"):
+if tool_short in ("memory_store", "memory_update", "plan_create"):
     current_project = tool_input.get("project", "")
 
     if not current_project:
-        # Detect project dynamically from cwd path components
-        parts = cwd.replace("\\", "/").split("/")
         detected = ""
         skip = {"home", "Users", "projects", "src", "work", "dev", "repos", "code", ".claude", ""}
+        if tool_short == "plan_create":
+            # A plan is surfaced by matching its project against the cwd, so name it after
+            # the repo, not whichever subdirectory the session happens to be in. The common
+            # git dir's parent is the MAIN checkout, so a plan made in a worktree still
+            # surfaces in the repo itself; submodules keep their own top level.
+            try:
+                import subprocess
+                def git(*args):
+                    return subprocess.run(["git", "-C", cwd, "rev-parse", *args],
+                                          capture_output=True, text=True,
+                                          timeout=2).stdout.strip()
+                common = git("--path-format=absolute", "--git-common-dir")
+                if os.path.basename(common) == ".git":
+                    name = os.path.basename(os.path.dirname(common))
+                else:
+                    name = os.path.basename(git("--show-toplevel"))
+                if name not in skip and len(name) > 2 and not name.startswith("."):
+                    detected = name
+            except Exception:
+                detected = ""
+        # Otherwise detect project dynamically from cwd path components
+        parts = cwd.replace("\\", "/").split("/")
         for p in reversed(parts):
+            if detected:
+                break
             if p not in skip and len(p) > 2 and not p.startswith("."):
                 detected = p
                 break
