@@ -120,13 +120,16 @@ class _IsolatedStore(unittest.TestCase):
             self.client.delete_collection(TEST_COLLECTION)
         self.col = self.client.get_or_create_collection(
             TEST_COLLECTION, embedding_function=WordsEF(), metadata={"hnsw:space": "cosine"})
-        self._saved = (P.COLLECTION, P.LOCK_PATH, P._collection_factory)
+        self._saved = (P.COLLECTION, P.LOCK_PATH, P._collection_factory,
+                       P.NOTES_ARCHIVE_DIR, P.MAX_NOTES)
         P.COLLECTION = TEST_COLLECTION
         P.LOCK_PATH = os.path.join(self.tmp.name, "plans.lock")
         P._collection_factory = lambda: self.col
+        P.NOTES_ARCHIVE_DIR = tempfile.mkdtemp(dir=self.tmp.name)
 
     def tearDown(self):
-        P.COLLECTION, P.LOCK_PATH, P._collection_factory = self._saved
+        (P.COLLECTION, P.LOCK_PATH, P._collection_factory, P.NOTES_ARCHIVE_DIR,
+         P.MAX_NOTES) = self._saved
 
     def _age(self, plan_id, **meta):
         """Backdate bookkeeping fields directly (the API never sets them to the past)."""
@@ -350,6 +353,231 @@ class PlanLogicTests(_IsolatedStore):
         with self.assertRaises(P.PlanError):
             P.update("p", note="x", notes_mode="overwrite")
 
+    # ── notes over the cap move to the plan's archive file (2026-10-14) ──────────────
+
+    def _fill(self, n, width=60):
+        """Append n stamped notes "note 01 ...", each `width` characters of text."""
+        for i in range(1, n + 1):
+            P.update("p", note=f"note {i:02d} " + "x" * (width - 8))
+
+    def _archived(self):
+        path = P.notes_archive_path("p")
+        if not os.path.exists(path):
+            return ""
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_an_append_over_the_cap_moves_the_oldest_notes_out_and_loses_none(self):
+        P.MAX_NOTES = 600
+        P.create("Plan", plan_id="p")
+        self._fill(12)                     # 12 notes of 19 + 60 chars, a newline apart: 959 > 600
+        notes = P.get("p")["notes"]
+        self.assertLessEqual(len(notes), 600)
+        first, *rest = notes.splitlines()
+        self.assertEqual(first, f"(Older notes moved to {P.notes_archive_path('p')}; "
+                                "read it for the earlier history.)")
+        kept = [int(re.search(r"note (\d\d)", line).group(1)) for line in rest]
+        archived = [int(n) for n in re.findall(r"\] note (\d\d) ", self._archived())]
+        self.assertEqual(kept, list(range(kept[0], 13)), "the newest notes are kept, in order")
+        self.assertEqual(archived + kept, list(range(1, 13)), "every note is in exactly one place")
+        self.assertEqual(oct(os.stat(P.notes_archive_path("p")).st_mode & 0o777), "0o600")
+
+    def test_the_archive_line_is_one_line_however_often_notes_move(self):
+        P.MAX_NOTES = 400
+        P.create("Plan", plan_id="p")
+        self._fill(30)
+        notes = P.get("p")["notes"]
+        self.assertEqual(notes.count("(Older notes moved to"), 1)
+        archived = [int(n) for n in re.findall(r"\] note (\d\d) ", self._archived())]
+        kept = [int(n) for n in re.findall(r"\] note (\d\d) ", notes)]
+        self.assertEqual(archived + kept, list(range(1, 31)))
+        self.assertGreater(self._archived().count("moved out of plan p"), 1)
+
+    def test_a_condensed_summary_stays_while_it_fits_and_goes_first_when_it_must(self):
+        P.MAX_NOTES = 600
+        P.create("Plan", plan_id="p")
+        P.update("p", note="SUMMARY: the state of things.", notes_mode="replace")
+        self._fill(12)
+        notes = P.get("p")["notes"]
+        self.assertIn("SUMMARY: the state of things.", notes.splitlines()[1],
+                      "kept, under the archive line")
+        self.assertNotIn("SUMMARY", self._archived())
+        marker = P.notes_archive_marker("p") + "\n"
+        # fits alone after the archive line, but not with the summary as well
+        big = "BIG " + "y" * (600 - len(marker) - len("[2026-10-14 10:31] BIG ") - 10)
+        P.update("p", note=big)
+        notes = P.get("p")["notes"]
+        self.assertNotIn("SUMMARY", notes)
+        archive = self._archived()
+        self.assertLess(archive.rindex("SUMMARY"), archive.rindex("] note 12 "),
+                        "the summary is older than every stamped note, so it is archived first")
+        self.assertTrue(notes.splitlines()[-1].endswith(big))
+
+    def test_a_note_too_long_to_fit_alone_is_refused_and_nothing_moves(self):
+        P.MAX_NOTES = 300
+        P.create("Plan", plan_id="p")
+        self._fill(3)
+        before = P.get("p")["notes"]
+        with self.assertRaisesRegex(P.PlanError,
+                                    r"this note is 309 chars with its timestamp; at most \d+ fit"):
+            P.update("p", note="z" * 290)
+        self.assertEqual(P.get("p")["notes"], before)
+        self.assertEqual(self._archived(), "")
+
+    def test_a_condensed_log_over_the_cap_is_still_refused(self):
+        P.MAX_NOTES = 300
+        P.create("Plan", plan_id="p")
+        with self.assertRaisesRegex(P.PlanError, "condensed notes too long"):
+            P.update("p", note="c" * 301, notes_mode="replace")
+        self.assertEqual(self._archived(), "")
+
+    def test_a_failed_archive_write_changes_nothing(self):
+        P.MAX_NOTES = 400
+        P.create("Plan", plan_id="p")
+        self._fill(5)
+        before = P.get("p")["notes"]
+        blocker = os.path.join(self.tmp.name, "a-file")
+        open(blocker, "w").close()
+        P.NOTES_ARCHIVE_DIR = os.path.join(blocker, "sub")    # no folder can be made under a file
+        self._age("p", updated="2000-01-01T00:00:00")     # a 1-second clock could hide a bump
+        updated = P.get("p")["updated"]
+        with self.assertRaisesRegex(P.PlanError, "could not move older notes"):
+            self._fill(6)
+        self.assertEqual((P.get("p")["notes"], P.get("p")["updated"]), (before, updated))
+
+    def test_the_archive_file_name_cannot_leave_its_folder(self):
+        self.assertEqual(os.path.dirname(P.notes_archive_path("../../etc/x")), P.NOTES_ARCHIVE_DIR)
+
+    def test_the_file_and_every_folder_made_for_it_are_flushed_every_time(self):
+        P.MAX_NOTES = 400
+        P.NOTES_ARCHIVE_DIR = os.path.join(self.tmp.name, "fresh", "notes")
+        flushed = []
+        real_fsync, real_open = os.fsync, os.open
+        opened = {}
+
+        def fake_open(path, flags, *a):
+            fd = real_open(path, flags, *a)
+            opened[fd] = path
+            return fd
+
+        def fake_fsync(fd):
+            flushed.append(opened.get(fd, "the archive file"))
+            real_fsync(fd)
+        P.create("Plan", plan_id="p")
+        P.os.open, P.os.fsync = fake_open, fake_fsync
+        try:
+            self._fill(8)
+        finally:
+            P.os.open, P.os.fsync = real_open, real_fsync
+        notes_dir = P.NOTES_ARCHIVE_DIR
+        self.assertIn(notes_dir, flushed)
+        self.assertIn(os.path.dirname(notes_dir), flushed, "the folder made for it")
+        self.assertIn(os.path.dirname(os.path.dirname(notes_dir)), flushed, "and the one above")
+        before = flushed.count(notes_dir)
+        P.os.open, P.os.fsync = fake_open, fake_fsync
+        try:
+            self._fill(8)
+        finally:
+            P.os.open, P.os.fsync = real_open, real_fsync
+        self.assertGreater(flushed.count(notes_dir), before, "flushed again on a later move")
+        self.assertGreater(flushed.count(os.path.dirname(notes_dir)), 1,
+                           "and its parent again too, so a retry after a failed flush skips none")
+
+    def test_the_folders_flushed_are_the_real_ones_behind_a_symlink(self):
+        P.MAX_NOTES = 400
+        real = os.path.join(self.tmp.name, "real", "deep")
+        os.makedirs(real)
+        link = os.path.join(self.tmp.name, "link")
+        os.symlink(real, link)
+        P.NOTES_ARCHIVE_DIR = os.path.join(link, "..", "notes")   # really <tmp>/real/notes
+        flushed, real_fsync, real_open, opened = [], os.fsync, os.open, {}
+
+        def fake_open(path, flags, *a):
+            fd = real_open(path, flags, *a)
+            opened[fd] = path
+            return fd
+        P.create("Plan", plan_id="p")
+        P.os.open = fake_open
+        P.os.fsync = lambda fd: (flushed.append(opened.get(fd, "file")), real_fsync(fd))
+        try:
+            self._fill(8)
+        finally:
+            P.os.open, P.os.fsync = real_open, real_fsync
+        self.assertIn(os.path.join(os.path.realpath(self.tmp.name), "real", "notes"), flushed)
+        self.assertIn(os.path.join(os.path.realpath(self.tmp.name), "real"), flushed)
+
+    def test_a_condensed_log_starting_with_the_marker_and_crlf_gets_no_second_marker(self):
+        P.MAX_NOTES = 400
+        P.create("Plan", plan_id="p")
+        self._fill(8)
+        P.update("p", note=P.notes_archive_marker("p") + "\r\nkept", notes_mode="replace")
+        self.assertEqual(P.get("p")["notes"].count("(Older notes moved to"), 1)
+
+    def test_a_folder_setting_with_a_line_break_is_refused(self):
+        P.NOTES_ARCHIVE_DIR = os.path.join(self.tmp.name, "a\nb")
+        with self.assertRaisesRegex(P.PlanError, "single-line path"):
+            P.notes_archive_path("p")
+
+    def test_the_archive_folder_is_made_owner_only_when_it_does_not_exist(self):
+        P.MAX_NOTES = 400
+        P.NOTES_ARCHIVE_DIR = os.path.join(self.tmp.name, "not-yet", "notes")
+        P.create("Plan", plan_id="p")
+        self._fill(8)
+        self.assertEqual(oct(os.stat(P.NOTES_ARCHIVE_DIR).st_mode & 0o777), "0o700")
+        self.assertIn("] note 01 ", self._archived())
+
+    def test_the_new_note_is_never_split_by_a_line_in_it_that_looks_like_a_stamp(self):
+        P.MAX_NOTES = len(P.notes_archive_marker("p")) + 300
+        P.create("Plan", plan_id="p")
+        self._fill(4)
+        body = "pasted log:\n[2026-01-01 00:00] an old line\n" + "w" * 150
+        P.update("p", note=body)
+        notes = P.get("p")["notes"]
+        self.assertTrue(notes.endswith(body), "the whole new note is kept")
+        self.assertNotIn("an old line", self._archived())
+
+    def test_only_this_plans_own_marker_line_is_dropped(self):
+        # A summary whose first line merely starts like the marker is text, not the marker (Codex).
+        P.MAX_NOTES = 500
+        P.create("Plan", plan_id="p")
+        lookalike = "(Older notes moved to the shelf; ask Ana.)\nSUMMARY"
+        P.update("p", note=lookalike, notes_mode="replace")
+        self._fill(8)
+        notes, archive = P.get("p")["notes"], self._archived()
+        self.assertEqual(notes.count(P.notes_archive_marker("p")), 1)
+        self.assertEqual((notes + archive).count(lookalike), 1,
+                         "kept or archived whole, never dropped")
+
+    def test_a_blank_preamble_does_not_block_a_note_that_fits(self):
+        marker = P.notes_archive_marker("p")
+        P.MAX_NOTES = len(marker) + 200
+        P.create("Plan", plan_id="p")
+        # a replace refuses blank text, so the blank log is set in the store directly
+        self._age("p", notes=" \n" * (len(marker) // 2 + 20))
+        note = "q" * (200 - 1 - len("[2026-10-14 10:31] ") - 5)    # fits after the marker alone
+        calls = []
+        real = P._fit_notes
+        P._fit_notes = lambda *a: calls.append(a) or real(*a)
+        try:
+            P.update("p", note=note)
+        finally:
+            P._fit_notes = real
+        self.assertEqual(len(calls), 1, "the append overflowed, so the fitting ran")
+        self.assertEqual(P.get("p")["notes"].split("\n")[0], marker)
+        self.assertTrue(P.get("p")["notes"].endswith(note))
+
+    def test_a_condensed_log_keeps_pointing_at_the_archive(self):
+        P.MAX_NOTES = 400
+        P.create("Plan", plan_id="p")
+        P.update("p", note="no archive yet", notes_mode="replace")
+        self.assertEqual(P.get("p")["notes"], "no archive yet")
+        self._fill(8)
+        P.update("p", note="CONDENSED: the state now", notes_mode="replace")
+        self.assertEqual(P.get("p")["notes"],
+                         P.notes_archive_marker("p") + "\nCONDENSED: the state now")
+        P.update("p", note=P.notes_archive_marker("p") + "\nagain", notes_mode="replace")
+        self.assertEqual(P.get("p")["notes"].count("(Older notes moved to"), 1)
+
     def test_update_is_atomic_when_a_later_field_is_invalid(self):
         P.create("Original title", plan_id="p", items="a")
         with self.assertRaises(P.PlanError):
@@ -525,7 +753,8 @@ class PlanToolTests(_IsolatedStore):
     def setUp(self):
         super().setUp()
         self._audit = self.M.AUDIT_LOG
-        self.M.AUDIT_LOG = os.path.join(self.tmp.name, "audit.jsonl")
+        # one audit log per test, so an entry from one test cannot satisfy another
+        self.M.AUDIT_LOG = os.path.join(tempfile.mkdtemp(dir=self.tmp.name), "audit.jsonl")
 
     def tearDown(self):
         self.M.AUDIT_LOG = self._audit
@@ -553,6 +782,33 @@ class PlanToolTests(_IsolatedStore):
             entries = [json.loads(line) for line in f]
         backup = [e for e in entries if e["action"] == "plan_delete"][0]["plan_backup"]
         self.assertEqual(backup["items"][1]["text"], "two")
+
+    def test_the_tool_says_where_older_notes_went(self):
+        P.MAX_NOTES = len(P.notes_archive_marker("p")) + 300
+        P.create("Plan", plan_id="p")
+        i = 0
+        while len(P.get("p")["notes"] or "") <= P.MAX_NOTES - 79:   # until the next note overflows
+            i += 1
+            P.update("p", note=f"note {i:02d} " + "x" * 52)
+        out = self.M.plan_update("p", note="the overflowing note " + "x" * 40)
+        self.assertIn(f"older note(s) moved to {P.notes_archive_path('p')} to stay under "
+                      f"{P.MAX_NOTES} chars", out)
+        out = self.M.plan_update("p", note="z" * P.MAX_NOTES)
+        self.assertIn("at most", out)
+        P.create("Other", plan_id="q")
+        self.assertNotIn("moved to", self.M.plan_update("q", note="short"))
+        with open(self.M.AUDIT_LOG) as f:
+            actions = [json.loads(line)["action"] for line in f]
+        self.assertIn("plan_notes_archived", actions)
+        self.assertIn(f"Its older notes remain at {P.notes_archive_path('p')}",
+                      self.M.plan_delete("p"))
+
+    def test_delete_says_deleted_even_when_the_archive_setting_is_broken(self):
+        P.create("Plan", plan_id="p")
+        P.NOTES_ARCHIVE_DIR = "bad\npath"
+        out = self.M.plan_delete("p")
+        self.assertIn("Plan p deleted", out)
+        self.assertIsNone(P.get("p"))
 
     def test_import_reports_lines_left_behind(self):
         out = self.M.plan_create("Service future work", items=FUTURE_WORK_MD, status="future")
@@ -676,7 +932,8 @@ class PlanLiveTests(unittest.TestCase):
         for r in P.list_plans(status="all"):
             P.delete(r["id"])
         self.env = dict(os.environ, CORTEX_PLANS_COLLECTION=self.NAME,
-                        CORTEX_PLANS_LOCK=P.LOCK_PATH)
+                        CORTEX_PLANS_LOCK=P.LOCK_PATH,
+                        CORTEX_PLANS_NOTES_ARCHIVE=os.path.join(self.tmp.name, "notes-archive"))
 
     def _hook(self, payload, **env):
         p = subprocess.run(["bash", os.path.join(ROOT, "plans.sh")], input=payload,

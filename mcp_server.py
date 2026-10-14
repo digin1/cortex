@@ -1041,7 +1041,9 @@ def plan_update(plan_id: str, title: str = "", goal: str = "", status: str = "",
         project: move to another project; "global" makes it surface everywhere
         note: a progress note, timestamped and appended ("where I stopped and why")
         notes_mode: "append" (default) or "replace" (note= becomes the whole log —
-                    for condensing it; an empty replace is refused)
+                    for condensing it; an empty replace is refused). An append that would
+                    take the log past its cap moves the oldest notes to the plan's archive
+                    file (~/.claude/cortex-plan-notes/<plan_id>.log) and says so.
         add_items: new checklist lines (same rules as plan_create), numbered after
                    the existing ones
         section: section heading for add_items that don't carry their own "## Heading"
@@ -1061,6 +1063,14 @@ def plan_update(plan_id: str, title: str = "", goal: str = "", status: str = "",
             changed.append("items changed")
         if note:
             changed.append("note added")
+        if r.get("notes_archive"):
+            parts = ([f"{r['notes_moved']} older note(s)"] if r.get("notes_moved") else [])
+            if r.get("notes_moved_preamble"):
+                parts.append("the text above the first dated note")
+            changed.append(f"{' and '.join(parts)} moved to {r['notes_archive']} to stay under "
+                           f"{P.MAX_NOTES} chars")
+            audit_log_write("plan_notes_archived", plan_id,
+                            reason=f"{' and '.join(parts)} to {r['notes_archive']}")
         p = P.progress(r)
         msg = (f"{_prefix()} Plan {plan_id} updated"
                + (f" ({'; '.join(changed)})" if changed else "")
@@ -1091,7 +1101,14 @@ def plan_delete(plan_id: str) -> str:
             return f"{_prefix()} Plan {plan_id} NOT deleted — could not archive it first ({e})."
         if r is None:
             return f"{_prefix()} No plan {plan_id}."
-        return f"{_prefix()} Plan {plan_id} deleted (archived to audit log)."
+        try:                                  # the plan is gone: nothing here may say otherwise
+            older = P.notes_archive_path(plan_id)
+            left = os.path.exists(older)
+        except P.PlanError:
+            older, left = "", False
+        return (f"{_prefix()} Plan {plan_id} deleted (archived to audit log)."
+                + (f" Its older notes remain at {older}; a new plan with this id would add to "
+                   "that file and point at it." if left else ""))
     return _plan_guard(run)
 
 

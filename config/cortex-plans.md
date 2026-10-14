@@ -72,6 +72,12 @@ tell the user it was not carried over.
   blocked on: <what>")`, so the next session resumes instead of re-deriving.
 - Item numbers are stable for life (removing #3 never renumbers #4), so a number quoted
   in a note or to the user stays correct.
+- **The notes log is capped at 12,000 characters.** A note that would take it past the
+  cap moves the oldest notes to the plan's own file,
+  `~/.claude/cortex-plan-notes/<plan_id>.log`, and the log then opens with one line
+  pointing there; the tool reply says what moved. Don't condense by hand just to make
+  room. `plan_get` shows only the log: read the file for the earlier history. A
+  condensed log (`notes_mode="replace"`) keeps that pointer line.
 
 ## When one is SURFACED
 

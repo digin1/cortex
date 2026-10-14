@@ -45,6 +45,12 @@ MAX_GOAL = 4000
 MAX_ITEM_TEXT = 500
 MAX_ITEMS = 150
 MAX_NOTES = 12000
+# Where a plan's older notes go when an appended note would take the log past MAX_NOTES: one
+# append-only file per plan, owner-only. NOT the audit log, which keeps 90 days.
+NOTES_ARCHIVE_DIR = (os.environ.get("CORTEX_PLANS_NOTES_ARCHIVE")
+                     or os.path.expanduser("~/.claude/cortex-plan-notes"))
+NOTES_ARCHIVE_MARKER = "(Older notes moved to "
+_NOTE_STAMP = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ", re.M)
 MAX_DOCUMENT = 8000              # embedded text; the checklist beyond this still exists
 
 # Measured against gte-modernbert on neutral example plans (2026-09-16): prompts about
@@ -318,6 +324,86 @@ def _status_where(statuses):
 
 # ── Writes ────────────────────────────────────────────────────────────────────────
 
+def notes_archive_path(plan_id):
+    """The file a plan's older notes are moved to (see `_fit_notes`)."""
+    if not NOTES_ARCHIVE_DIR or any(not ch.isprintable() for ch in NOTES_ARCHIVE_DIR):
+        raise PlanError("CORTEX_PLANS_NOTES_ARCHIVE must be a single-line path")
+    return os.path.join(NOTES_ARCHIVE_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", plan_id) + ".log")
+
+
+def notes_archive_marker(plan_id):
+    """The one line a log opens with once some of its notes live in the archive file."""
+    return f"{NOTES_ARCHIVE_MARKER}{notes_archive_path(plan_id)}; read it for the earlier history.)"
+
+
+def _fit_notes(plan_id, old, entry):
+    """An append that would take the log past MAX_NOTES, made to fit: (kept, moved).
+
+    `old` is the log before the append: a preamble (unstamped text first, e.g. a condensed
+    summary) and then the stamped notes, oldest first. `entry` is the new stamped note and is
+    never split, whatever its body looks like. The oldest stamped notes are moved out first;
+    the preamble goes only if the new note still does not fit with it, and it is then put in
+    front of them, since it is older than every stamped note. The kept log opens with the
+    marker line, so the earlier history reads as moved, not lost. A note too long to fit
+    alone is refused. (A body line that looks like a stamp inside an OLDER note splits that
+    note at the line; both parts are kept, in order, possibly one in each place.)"""
+    marker = notes_archive_marker(plan_id)
+    starts = [m.start() for m in _NOTE_STAMP.finditer(old)]
+    pre = old[:starts[0]] if starts else old
+    entries = [old[a:b] for a, b in zip(starts, starts[1:] + [len(old)])]
+    if pre.split("\n", 1)[0].rstrip("\r") == marker:     # only this plan's own marker line
+        pre = pre.split("\n", 1)[1] if "\n" in pre else ""
+    if not pre.strip():
+        pre = ""
+    moved = []
+
+    def kept():
+        body = (pre + "".join(entries)).rstrip("\n")
+        return marker + "\n" + (body + "\n" if body else "") + entry
+
+    while len(kept()) > MAX_NOTES and entries:
+        moved.append(entries.pop(0))
+    if len(kept()) > MAX_NOTES and pre:
+        moved.insert(0, pre)
+        pre = ""
+    if len(kept()) > MAX_NOTES:
+        room = MAX_NOTES - len(marker) - 1
+        raise PlanError(f"this note is {len(entry)} chars with its timestamp; at most {room} "
+                        "fit in the log after the archive line. Shorten it.")
+    return kept(), "".join(moved)
+
+
+def _fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _archive_notes(plan_id, text):
+    """Append moved notes to the plan's archive file before the plan changes. The file, its
+    folder and that folder's parent are flushed to disk EVERY time, so a retry after a failed
+    flush skips none of them; so is the parent of any further folder made this time. (Folders
+    more than one level deep that an earlier, failed attempt made are not flushed again; the
+    default folder is one level inside ~/.claude.)"""
+    # real folders, so a symlink followed by ".." flushes the folder actually used
+    made, d = [], os.path.realpath(NOTES_ARCHIVE_DIR)
+    while not os.path.isdir(d):
+        made.append(d)
+        d = os.path.dirname(d)
+    os.makedirs(NOTES_ARCHIVE_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(notes_archive_path(plan_id), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(f"===== {now_iso()} moved out of plan {plan_id} =====\n{text.rstrip()}\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    folder = os.path.realpath(NOTES_ARCHIVE_DIR)
+    for d in dict.fromkeys([folder, os.path.dirname(folder)]
+                           + [os.path.dirname(m) for m in made]):
+        _fsync_dir(d)
+
+
 def create(title, items="", goal="", project="", status="active", tags="", links="",
            plan_id="", force=False):
     title = _validate_title(title)
@@ -485,6 +571,7 @@ def update(plan_id, title=None, goal=None, status=None, project=None, tags=None,
             raise PlanError(f"too many items ({len(items)}, max {MAX_ITEMS}); split the plan")
 
         note = str(note or "").strip()
+        moved_notes = ""
         mode = (notes_mode or "append").strip().lower()
         if mode not in ("append", "replace"):
             raise PlanError("notes_mode must be 'append' or 'replace'")
@@ -494,17 +581,37 @@ def update(plan_id, title=None, goal=None, status=None, project=None, tags=None,
         if note:
             if mode == "replace":
                 notes = note
+                # a condensed log keeps pointing at the archive, if the plan has one
+                if (os.path.exists(notes_archive_path(plan_id))
+                        and notes.split("\n", 1)[0].rstrip("\r") != notes_archive_marker(plan_id)):
+                    notes = notes_archive_marker(plan_id) + "\n" + notes
+                if len(notes) > MAX_NOTES:
+                    raise PlanError(f"condensed notes too long ({len(notes)} chars with any "
+                                    f"archive line, max {MAX_NOTES}); shorten them")
             else:
+                # the stamp is the shape _NOTE_STAMP finds
                 entry = f"[{now_iso()[:16].replace('T', ' ')}] {note}"
-                notes = f"{row.get('notes')}\n{entry}" if row.get("notes") else entry
-            if len(notes) > MAX_NOTES:
-                raise PlanError(f"notes would exceed {MAX_NOTES} chars; condense them "
-                                "with notes_mode='replace'")
+                old = row.get("notes") or ""
+                notes = f"{old}\n{entry}" if old else entry
+                if len(notes) > MAX_NOTES:
+                    # An append over the cap moves the oldest notes to the archive file
+                    # instead of being refused, which had left only two choices: lose the new
+                    # note or replace the whole log.
+                    notes, moved_notes = _fit_notes(plan_id, old, entry)
             if notes != row.get("notes", ""):
                 meta["notes"] = notes
 
         if not meta:
             raise PlanError("nothing to update")
+        if moved_notes:
+            # Written before the plan changes, so a failed write changes nothing. A failure
+            # after it leaves the moved notes in both places, never in neither, and a retry
+            # appends the same block to the archive again (a duplicate, never a loss).
+            try:
+                _archive_notes(plan_id, moved_notes)
+            except OSError as e:
+                raise PlanError(f"could not move older notes to {notes_archive_path(plan_id)} "
+                                f"({e}); nothing was changed")
 
         if "items" in meta:
             meta["items"] = json.dumps(items)
@@ -519,6 +626,9 @@ def update(plan_id, title=None, goal=None, status=None, project=None, tags=None,
         else:
             col.update(ids=[plan_id], metadatas=[meta])
         merged["items"] = items
+        merged["notes_moved"] = len(_NOTE_STAMP.findall(moved_notes))
+        merged["notes_moved_preamble"] = bool(moved_notes) and not _NOTE_STAMP.match(moved_notes)
+        merged["notes_archive"] = notes_archive_path(plan_id) if moved_notes else ""
         return merged
 
 

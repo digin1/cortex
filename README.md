@@ -687,8 +687,8 @@ point. So plans get a third collection, `cortex_plans`.
 | `plan_list` | `open` (active + future, default), a single status, or `all`; `query=` ranks by similarity |
 | `plan_get` | The whole plan as a Markdown checklist with item numbers and notes |
 | `plan_check` | Tick items: `"3"`, `"3,5"`, `"2-4"` → `done` / `skipped` / `open` — all-or-nothing |
-| `plan_update` | Status (`active` / `future` / `done` / `abandoned`), wording (`"-"` clears goal, tags, links), add / remove / reword items, timestamped progress notes |
-| `plan_delete` | Remove outright (archived to the audit log first); prefer `status="abandoned"` |
+| `plan_update` | Status (`active` / `future` / `done` / `abandoned`), wording (`"-"` clears goal, tags, links), add / remove / reword items, timestamped progress notes (capped at 12,000 chars: older notes move to `~/.claude/cortex-plan-notes/<plan_id>.log`) |
+| `plan_delete` | Remove outright (archived to the audit log first; a notes archive file is left in place and named in the reply); prefer `status="abandoned"` |
 
 ### Guarantees
 
@@ -696,6 +696,14 @@ point. So plans get a third collection, `cortex_plans`.
   are never reused, so a reference written in one session means the same item in the next.
 - **All-or-nothing edits.** One unknown item number, or one invalid field, and nothing is
   written.
+- **Notes are moved, never dropped.** An appended note that would take the log past
+  12,000 characters is not refused: the oldest notes (then, if needed, the text above the
+  first dated note) move to an append-only, owner-only file per plan, flushed to disk with
+  its folder before the plan changes, and the log keeps one line pointing at it. A single
+  note too long to fit even alone, or a replacement log over the cap, is still refused. The
+  file is never pruned (unlike the audit log, kept 90 days). If the plan update fails after
+  that write, the moved notes are in both places, never in neither; a retry adds them to
+  the file again.
 - **Concurrent sessions don't lose ticks.** Each session runs its own MCP server, so
   read-modify-write is serialised with a file lock, and the prompt hook's bookkeeping
   writes only its own metadata keys.
@@ -800,6 +808,7 @@ plan_update(plan_id="plan_migrate_auth_to_oidc", note="reporting blocked on IdP 
 ├── .cortex_sessions.jsonl           # Session start/end markers
 ├── .cortex_config                   # Feature toggles JSON (auto_learn, auto_skills, etc.)
 ├── .cortex_plans.lock               # Serialises plan edits across concurrent sessions
+├── cortex-plan-notes/               # Older plan notes moved out of a full log, one file per plan
 ├── .retired-agents/               # Retired agents (outside git dirs to avoid discovery)
 └── agents/
     └── *.md                       # Active global agents (memory: user)
