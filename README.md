@@ -29,6 +29,14 @@
   <a href="#-safety-guardrails">Safety</a>
 </p>
 
+<!-- Demo video: drag the MP4 into this file in the github.com editor and put the
+     https://github.com/user-attachments/assets/... line GitHub inserts here, on its own line.
+     GitHub then shows it as a player; the screenshot below can stay or go. -->
+
+<p align="center">
+  <img src="docs/demo.jpg" alt="A new Claude Code session: cortex recalls 'Use pnpm, never npm. VPN up before staging deploys.' before the agent acts, and the deploy works first try" width="820">
+</p>
+
 ---
 
 ## What It Does
