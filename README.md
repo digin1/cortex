@@ -29,6 +29,10 @@
   <a href="#-safety-guardrails">Safety</a>
 </p>
 
+
+https://github.com/user-attachments/assets/82750aee-283c-4ce5-92df-cd54b434bf05
+
+
 <!-- Demo video: drag the MP4 into this file in the github.com editor and put the
      https://github.com/user-attachments/assets/... line GitHub inserts here, on its own line.
      GitHub then shows it as a player; the screenshot below can stay or go. -->
