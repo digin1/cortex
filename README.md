@@ -37,9 +37,6 @@ https://github.com/user-attachments/assets/82750aee-283c-4ce5-92df-cd54b434bf05
      https://github.com/user-attachments/assets/... line GitHub inserts here, on its own line.
      GitHub then shows it as a player; the screenshot below can stay or go. -->
 
-<p align="center">
-  <img src="docs/demo.jpg" alt="A new Claude Code session: cortex recalls 'Use pnpm, never npm. VPN up before staging deploys.' before the agent acts, and the deploy works first try" width="820">
-</p>
 
 ---
 
