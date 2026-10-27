@@ -19,11 +19,15 @@ if ! command -v claude &>/dev/null; then
 fi
 
 if ! command -v python3 &>/dev/null; then
-    echo "  ERROR: python3 not found. Install Python 3.8+ first."
+    echo "  ERROR: python3 not found. Install Python 3.10+ first."
     exit 1
 fi
 
 PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"; then
+    echo "  ERROR: Python $PYTHON_VERSION found; cortex needs 3.10+ (the MCP SDK requires it)."
+    exit 1
+fi
 echo "  Python: $PYTHON_VERSION"
 
 # Step 2: Install ChromaDB
@@ -43,6 +47,22 @@ else
         echo "  ChromaDB installed successfully."
     else
         echo "  ERROR: Could not install ChromaDB. Install manually: pip install chromadb"
+        exit 1
+    fi
+fi
+
+# mcp is the MCP SDK that mcp_server.py is built on (FastMCP). Without it the cortex
+# server cannot start, so every memory, reminder and plan tool is missing. Pinned below 2:
+# mcp 2.x renamed FastMCP to MCPServer and removed mcp.server.fastmcp.
+if python3 -c "import mcp.server.fastmcp" 2>/dev/null; then
+    echo "  MCP SDK already installed."
+else
+    if python3 -m pip install --user "mcp>=1.2,<2" 2>/dev/null \
+       || python3 -m pip install "mcp>=1.2,<2" 2>/dev/null \
+       || python3 -m pip install --break-system-packages "mcp>=1.2,<2" 2>/dev/null; then
+        echo "  MCP SDK installed."
+    else
+        echo "  ERROR: Could not install the MCP SDK. Install manually: pip install 'mcp>=1.2,<2'"
         exit 1
     fi
 fi
@@ -148,44 +168,21 @@ fi
 echo ""
 echo "[4/6] Configuring MCP server..."
 
-MCP_FILE="$CLAUDE_DIR/.mcp.json"
-
-if [ -f "$MCP_FILE" ]; then
-    # Check if cortex entry already exists
-    if python3 -c "import json; d=json.load(open('$MCP_FILE')); exit(0 if 'cortex' in d.get('mcpServers',{}) else 1)" 2>/dev/null; then
-        echo "  MCP server already configured."
+# Claude Code reads user-scope MCP servers from ~/.claude.json, which `claude mcp add`
+# manages; a ~/.claude/.mcp.json file is not read from other projects.
+MCP_CMD="claude mcp add --scope user cortex -- python3 -W ignore $CORTEX_DIR/mcp_server.py"
+if command -v claude >/dev/null 2>&1; then
+    if claude mcp get cortex 2>/dev/null | grep -q "Scope: User config"; then
+        echo "  MCP server already registered for all projects."
+    elif claude mcp add --scope user cortex -- python3 -W ignore "$CORTEX_DIR/mcp_server.py" >/dev/null 2>&1; then
+        echo "  MCP server registered for all projects (user scope)."
     else
-        # Merge cortex into existing config
-        python3 -W ignore -c "
-import json
-with open('$MCP_FILE', 'r') as f:
-    config = json.load(f)
-config.setdefault('mcpServers', {})['cortex'] = {
-    'type': 'stdio',
-    'command': 'python3',
-    'args': ['-W', 'ignore', '$CORTEX_DIR/mcp_server.py']
-}
-with open('$MCP_FILE', 'w') as f:
-    json.dump(config, f, indent=2)
-print('  MCP server added to existing config.')
-"
+        echo "  WARN: could not register the MCP server. Run:"
+        echo "        $MCP_CMD"
     fi
 else
-    python3 -W ignore -c "
-import json
-config = {
-    'mcpServers': {
-        'cortex': {
-            'type': 'stdio',
-            'command': 'python3',
-            'args': ['-W', 'ignore', '$CORTEX_DIR/mcp_server.py']
-        }
-    }
-}
-with open('$MCP_FILE', 'w') as f:
-    json.dump(config, f, indent=2)
-print('  MCP server config created.')
-"
+    echo "  NOTE: claude CLI not found. Once Claude Code is installed, run:"
+    echo "        $MCP_CMD"
 fi
 
 # Step 5: Configure hooks and permissions in settings.json
@@ -195,7 +192,7 @@ echo "[5/6] Configuring hooks and permissions..."
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 
 python3 -W ignore -c "
-import json, os
+import json, os, re
 
 settings_path = '$SETTINGS_FILE'
 
@@ -253,7 +250,6 @@ cortex_hooks = {
     'PreToolUse': [{'matcher': 'mcp__cortex', 'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/cortex_pretool_enrich.sh 2>/dev/null', 'statusMessage': 'Enriching cortex operation...'}]}],
     'PostToolUse': [{'matcher': 'Agent', 'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/agent_track.sh 2>/dev/null', 'statusMessage': 'Tracking agent usage...'}]}],
     'PreCompact': [{'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/compact_save.sh 2>/dev/null', 'statusMessage': 'Extracting learnings + managing agent fleet...'}]}],
-    'PostCompact': [{'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/post_compact_save.sh 2>/dev/null', 'statusMessage': 'Extracting knowledge from compressed context...'}]}],
     'SubagentStart': [{'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/agent_context_inject.sh 2>/dev/null', 'statusMessage': 'Injecting cortex context into agent...'}]}],
     'SessionStart': [
         {'hooks': [{'type': 'command', 'command': 'bash $CORTEX_DIR/cleanup.sh 2>/dev/null', 'statusMessage': 'Cleaning stale memory snapshots...', 'async': True}]},
@@ -270,6 +266,23 @@ cortex_hooks = {
 
 # Merge hooks (don't overwrite non-cortex hooks)
 existing_hooks = settings.get('hooks', {})
+
+# Earlier versions registered post_compact_save.sh, which has since been removed;
+# drop that entry so an upgrade doesn't keep calling a missing script.
+for event in list(existing_hooks):
+    kept = []
+    for group in existing_hooks[event]:
+        inner = group.get('hooks', [])
+        live = [h for h in inner if not re.search(r'(^|[\s/])skills/cortex/post_compact_save\.sh', h.get('command', ''))]
+        if len(live) == len(inner):
+            kept.append(group)
+        elif live:
+            kept.append({**group, 'hooks': live})
+    if kept:
+        existing_hooks[event] = kept
+    elif existing_hooks[event]:
+        del existing_hooks[event]
+
 for event, hook_list in cortex_hooks.items():
     if event not in existing_hooks:
         existing_hooks[event] = hook_list

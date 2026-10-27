@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0wIDE4Yy00LjQyIDAtOC0zLjU4LTgtOHMzLjU4LTggOC04IDggMy41OCA4IDgtMy41OCA0LTggOHoiLz48L3N2Zz4=" alt="Claude Code Plugin">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License">
-  <img src="https://img.shields.io/badge/Python-3.8+-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/ChromaDB-Vector_Store-orange?style=for-the-badge" alt="ChromaDB">
   <img src="https://img.shields.io/badge/Hooks-11_events-blueviolet?style=for-the-badge" alt="11 Hook Events">
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=for-the-badge" alt="Platform">
@@ -65,7 +65,7 @@ cortex gives Claude Code **persistent memory across sessions** and **self-managi
 | Requirement | Version | Check |
 |---|---|---|
 | Claude Code | v2.1.9+ | `claude --version` |
-| Python | 3.8+ | `python3 --version` |
+| Python | 3.10+ | `python3 --version` |
 | pip | any | `pip --version` |
 
 ### Step 1: Clone
@@ -77,10 +77,10 @@ git clone https://github.com/digin1/cortex.git ~/.claude/skills/cortex
 ### Step 2: Install Dependencies
 
 ```bash
-pip install chromadb
+pip install chromadb "mcp>=1.2,<2"
 ```
 
-ChromaDB will also install `onnxruntime` (for embeddings) and `numpy`. No GPU required — CPU embeddings are fast enough.
+`mcp` is the MCP SDK the cortex server is built on; keep it below 2.0 (2.x renamed `FastMCP`). ChromaDB will also install `onnxruntime` (for embeddings) and `numpy`. No GPU required — CPU embeddings are fast enough.
 
 **Recommended: Run ChromaDB as a systemd user service** on `localhost:8100` using the v2 API. See `config/chromadb-service.md` for setup instructions. The v1 API is deprecated.
 
@@ -104,21 +104,13 @@ print(f'Database initialized: {col.count()} memories')
 
 ### Step 4: Configure MCP Server
 
-Add to your `~/.claude/.mcp.json` (create if it doesn't exist):
+Register cortex for every project (Claude Code keeps user-scope servers in `~/.claude.json`):
 
-```json
-{
-  "mcpServers": {
-    "cortex": {
-      "type": "stdio",
-      "command": "python3",
-      "args": ["-W", "ignore", "/home/YOUR_USERNAME/.claude/skills/cortex/mcp_server.py"]
-    }
-  }
-}
+```bash
+claude mcp add --scope user cortex -- python3 -W ignore ~/.claude/skills/cortex/mcp_server.py
 ```
 
-Replace `YOUR_USERNAME` with your actual username.
+Check it with `claude mcp get cortex`.
 
 ### Step 5: Configure Hooks
 
@@ -193,17 +185,6 @@ Add the following to your `~/.claude/settings.json` (merge with any existing set
         ]
       }
     ],
-    "PostCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/.claude/skills/cortex/post_compact_save.sh 2>/dev/null",
-            "statusMessage": "Extracting knowledge from compressed context..."
-          }
-        ]
-      }
-    ],
     "SubagentStart": [
       {
         "hooks": [
@@ -255,7 +236,7 @@ Add the following to your `~/.claude/settings.json` (merge with any existing set
             "async": true
           }
         ]
-      },
+      }
     ],
     "SessionEnd": [
       {
@@ -329,6 +310,50 @@ Then restart Claude Code. You should see the status line at the bottom and memor
 bash ~/.claude/skills/cortex/install.sh
 ```
 
+### Other agents: OpenCode, Codex, any MCP client
+
+`install.sh` sets up Claude Code. The same memory store also works from any agent that
+speaks MCP, because cortex is a local stdio MCP server (`mcp_server.py`, 19 tools for
+memories, reminders and plans). What differs is how much happens on its own:
+
+| Agent | Connects through | Recall | Saving |
+|---|---|---|---|
+| Claude Code | hooks + MCP | automatic, before each prompt | the agent stores as it works, plus a learning turn when it stops |
+| OpenCode | MCP + the same rules file | the agent searches when the rules tell it to | the agent stores when the rules tell it to |
+| Codex CLI | MCP | the agent calls the tools | the agent calls the tools |
+| Any MCP client | MCP | the agent calls the tools | the agent calls the tools |
+
+Run `install.sh` first (it installs the dependencies and the embedding sidecar), then point
+the other agent at the server. Use the absolute path to your home directory.
+
+**OpenCode** (`~/.config/opencode/opencode.json`):
+
+```json
+{
+  "mcp": {
+    "cortex": {
+      "type": "local",
+      "command": ["python3", "/home/YOUR_USERNAME/.claude/skills/cortex/mcp_server.py"],
+      "enabled": true
+    }
+  },
+  "instructions": ["~/.claude/CLAUDE.md"]
+}
+```
+
+The `instructions` line loads the same cortex rules Claude Code follows (search before
+saying "I don't remember", store corrections, and so on).
+
+**Codex CLI** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.cortex]
+command = "python3"
+args = ["/home/YOUR_USERNAME/.claude/skills/cortex/mcp_server.py"]
+```
+
+**Any other MCP client:** run `python3 ~/.claude/skills/cortex/mcp_server.py` as a stdio server.
+
 ---
 
 ## How It Works
@@ -353,8 +378,7 @@ Agent Spawned
   └── agent_track.sh          → log spawn to usage ledger
 
 Context Compressed
-  ├── compact_save.sh     → extract memories from transcript + create/evaluate agents
-  └── post_compact_save.sh → extract key insights from the compressed summary
+  └── compact_save.sh     → extract memories from transcript + create/evaluate agents
 
 Session Paused
   ├── learn.sh            → block stop + give Claude a turn to save learnings via MCP
@@ -475,7 +499,6 @@ Unlike the automatic path (which uses LLM knowledge only), the manual command us
 | `PostToolUse(Agent)` | `agent_track.sh` | Sync | Track agent spawns in usage ledger |
 | `SubagentStart` | `agent_context_inject.sh` | Sync | Inject domain memories into spawned agents |
 | `PreCompact` | `compact_save.sh` | Sync | Extract memories + create/evaluate agents |
-| `PostCompact` | `post_compact_save.sh` | Sync | Extract insights from compressed summary |
 | `SessionStart` | `cleanup.sh` | Async | Prune stale data |
 | `SessionStart` | `agent_bootstrap.sh` | Async | Bootstrap agents from cortex (daily) |
 | `SessionStart` | `memory_hygiene.sh` | Async | Dedup, path validation, consolidation (daily) |
@@ -540,12 +563,12 @@ This means agents **accumulate knowledge across sessions** in their own `MEMORY.
 | Health status | Based on score + 7-day usage |
 | Fleet dashboard | Run `/cortex agents` for full report |
 
-### Hard Caps
+### Limits
 
 | Limit | Value | Purpose |
 |---|---|---|
-| Max project agents | 5 | Prevent scope creep |
-| Max global agents | 5 | Prevent scope creep |
+| Max project agents | unlimited (`MAX_PROJECT_AGENTS` in `lib/fleet_create.py`) | Set a number to cap the fleet |
+| Max global agents | unlimited (`MAX_USER_AGENTS`) | Set a number to cap the fleet |
 | Semantic dedup threshold | 0.55 | Prevent duplicate agents |
 | Bootstrap per day | 1 per project | Prevent repeated creation |
 | Agents per batch | 3 (bootstrap), 5 (compact) | Conservative creation |
@@ -759,7 +782,6 @@ plan_update(plan_id="plan_migrate_auth_to_oidc", note="reporting blocked on IdP 
 │   ├── cortex_pretool_enrich.sh     # PreToolUse: auto-tag project + audit
 │   ├── agent_context_inject.sh    # SubagentStart: inject domain memories into agents
 │   ├── compact_save.sh            # PreCompact: extract memories + fleet management
-│   ├── post_compact_save.sh       # PostCompact: extract from compressed summary
 │   ├── agent_bootstrap.sh         # SessionStart: create agents from cortex knowledge
 │   ├── memory_hygiene.sh          # SessionStart: dedup, validate, consolidate
 │   ├── cleanup.sh                 # SessionStart: prune stale data
@@ -830,7 +852,7 @@ Project-level agents live at `<project>/.claude/agents/*.md` with `memory: proje
 | **No age-based deletion** | Memories never removed for being old (designed for long-running projects) |
 | **Path validation** | Broken file paths flagged, never auto-deleted |
 | **Agent path traversal** | `os.path.realpath()` + directory whitelisting |
-| **Agent hard caps** | Max 5 project + 5 global agents |
+| **Agent caps** | Unlimited by default; set `MAX_PROJECT_AGENTS` / `MAX_USER_AGENTS` in `lib/fleet_create.py` to cap |
 | **Agent filename sanitization** | Only `[a-z0-9\-_.]` allowed |
 | **Semantic dedup** | 0.55 threshold for agents, 0.15 for memories, 0.35 for hygiene merges |
 | **Backup before update** | Timestamped `.bak` files before agent overwrites |
@@ -852,8 +874,9 @@ Project-level agents live at `<project>/.claude/agents/*.md` with `memory: proje
 | Requirement | Version | Notes |
 |---|---|---|
 | Claude Code | v2.1.9+ | Needs `additionalContext` + `SubagentStart` hook support |
-| Python | 3.8+ | For ChromaDB and hook scripts |
+| Python | 3.10+ | For ChromaDB, the MCP SDK and hook scripts |
 | chromadb | Latest | `pip install chromadb` |
+| mcp | 1.x | `pip install "mcp>=1.2,<2"` (the MCP SDK the server runs on) |
 | claude CLI | Latest | For `claude -p` in compact/bootstrap/hygiene |
 
 ### Platform Support
