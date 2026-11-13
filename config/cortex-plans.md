@@ -79,6 +79,57 @@ tell the user it was not carried over.
   room. `plan_get` shows only the log: read the file for the earlier history. A
   condensed log (`notes_mode="replace"`) keeps that pointer line.
 
+## Moving on to the next item — automatically
+
+Once the user has asked to work a plan, finishing an item is not a place to stop. As
+soon as an item is ticked `done` (verified) or `skipped` (with its reason), start the
+next open item in the same turn. Don't ask "shall I carry on?" and don't wait for
+another prompt.
+
+1. **Tick it** with `plan_check`, putting the commit or the reason in `note=`.
+2. **Say it in one line**, e.g. *"#3 done (a1b2c3d). Starting #4: <item text>."*, so
+   the user can follow along and interrupt.
+3. **Pick the next item:** the lowest-numbered open item, unless the goal, the notes or
+   the item itself sets another order. Pass over an item that depends on one not yet
+   done, and say so; don't start it early.
+4. **Work it** to the same standard as the first: the same checks and the same reviews.
+
+**Stop only when one of these is true, and say which:**
+
+- **Every item is resolved.** Verify the goal, close the plan (`status="done"`) and say
+  so.
+- **Every remaining open item needs the user**, in any of these ways:
+  - a decision that is theirs: a choice between designs, a change of scope, a trade-off;
+  - an approval that another rule asks for;
+  - a credential or access only they can give;
+  - someone outside the session.
+- **Something needs judgement:**
+  - a check fails and the fix is not obvious;
+  - a review returns a blocking finding that has more than one reasonable fix;
+  - the item turns out materially bigger than written, or different from it.
+- **The user set a limit**: "only #4", "stop after #4", "one at a time".
+
+**Not reasons to stop:**
+
+- **One item is blocked.** Say so in the one-line progress message, note why with
+  `plan_update(note=...)`, and go on to the next item that doesn't depend on it.
+- **An item's proof lands later** (a scheduled run, a burn-in). Leave the item `open`
+  with a note saying what is still unproven, add a reminder linked to the plan
+  (`links="<plan_id>"`), and go on.
+
+When you do stop, write `plan_update(note="stopped at #4: <state>; next: <step>; blocked
+on: <what>")`. End the reply with what you need from the user: one question for each
+item you passed over. Once they answer, keep advancing from there.
+
+**What advancing does not change:**
+
+- It removes one question, "may I go on to the next item?", and no other. Everything
+  the other rules ask approval for still needs that approval inside each item. The same
+  goes for every review and check that has to pass before an item counts as done.
+- It applies only to a plan the user asked to work on in this session. A plan the hook
+  surfaces is still background (rule 3 below). Advancing never starts a `future` plan,
+  and finishing one plan never starts another.
+
 ## When one is SURFACED
 
 Plans arrive in a `[cortex]` block, in two forms:
